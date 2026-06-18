@@ -36,11 +36,16 @@ working-tree build for the deploy — reordering or bypassing is how the registr
 desynced (0.16.3 reached the dev-host via a working-tree self-install while npm sat
 5 minors behind, until corrected 2026-06-14).
 
-1. RELEASE: bump `package.json`, commit, then `npm publish` on EVERY bump so the
-   registry is the source of truth (matching the iapeer/notifier runtimes).
-   Authenticated as `agfpd-owner`; the package is public and source-distributed —
-   it ships `bin/ src/ tsconfig.json` per the `files` field, not the 63 MB compiled
-   bin. Confirm with `npm view @agfpd/telegram-runtime version`. The version also
+1. RELEASE: bump `package.json`, commit, push to origin, then `npm publish` on EVERY
+   bump so the registry is the source of truth (matching the iapeer/notifier runtimes).
+   Push BEFORE publish with an EXPLICIT `git push origin <branch>` (never a bare
+   `git push --follow-tags`, never publish-without-push): a push failure then surfaces
+   before the registry moves ahead of origin — otherwise npm carries a version git
+   lacks (silent repo-lag). Authenticated as `agfpd-owner`; the package is public and
+   source-distributed — it ships `bin/ src/ docs/*.md docs/ru/ tsconfig.json` per the
+   `files` field (NOT `docs/internals/`: a directory listed in `files` overrides
+   `.gitignore`/`.npmignore`, so the allowlist uses precise paths to exclude it), not
+   the 63 MB compiled bin. Confirm with `npm view @agfpd/telegram-runtime version`. The version also
    travels into the runtime manifest (package.json → `VERSION` → `buildManifest`),
    so `iapeer status` and the update-runtime version-gate can observe what is
    deployed.
