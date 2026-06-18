@@ -2,8 +2,9 @@
 
 **A Telegram bridge for a team of AI agents — the human-presence runtime of [iapeer](https://github.com/agfpd/iapeer).**
 
+[![CI](https://github.com/agfpd/telegram-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/agfpd/telegram-runtime/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@agfpd/telegram-runtime)](https://www.npmjs.com/package/@agfpd/telegram-runtime)
-[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
+[![license](https://img.shields.io/npm/l/@agfpd/telegram-runtime)](./LICENSE)
 [![platform](https://img.shields.io/badge/platform-macOS-lightgrey)](#quick-start)
 
 telegram-runtime lets a person live inside an [iapeer](https://github.com/agfpd/iapeer) agent team through Telegram: the owner messages an agent from the messenger and gets replies in the same chat. To the agent, the person is an ordinary peer it messages with `send_to_peer` — the bridge turns that into a Telegram message in the right chat, and turns the person's reply back into an ordinary inbound message. It carries voice, attachments, a typing indicator, an activity stream, and control commands.
