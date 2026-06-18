@@ -21,6 +21,13 @@ export const VERSION: string = pkg.version
  *  buildArgv fallback (`telegram-runtime`). */
 export const BIN_NAME = `${RUNTIME}-runtime`
 
+/** The unscoped npm package name — the per-package subdir id for the FU6 on-host docs
+ *  convention (`<IAPEER_ROOT>/docs/<PACKAGE_NAME>/`). The scope is stripped
+ *  (`@agfpd/telegram-runtime` → `telegram-runtime`). Single source of truth is
+ *  package.json `name`; happens to equal BIN_NAME here but is a distinct concept (the
+ *  PACKAGE identity, not the launcher binary name). */
+export const PACKAGE_NAME: string = pkg.name.split('/').pop() ?? pkg.name
+
 /** Peer-name grammar — identical to the IAP/foundation ecosystem
  *  (/^[a-z][a-z0-9-]{0,31}$/). */
 export const NAME_RE = /^[a-z][a-z0-9-]{0,31}$/

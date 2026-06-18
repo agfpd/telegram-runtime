@@ -3314,8 +3314,11 @@ async function selfInstallCommand(): Promise<void> {
   process.stdout.write(`  bin:      ${r.binPath}  (${r.binMode})\n`)
   process.stdout.write(`  manifest: ${r.manifestPath}\n`)
   process.stdout.write(`  root:     ${r.root}\n`)
+  process.stdout.write(
+    `  docs:     ${r.docs.copied ? r.docs.dest : `skipped (${r.docs.reason ?? 'unknown'})`}\n`,
+  )
   process.stderr.write(
-    `telegram-runtime ${JSON.stringify({ ts: new Date().toISOString(), evt: 'self-install', bin: r.binPath, manifest: r.manifestPath, binMode: r.binMode, root: r.root })}\n`,
+    `telegram-runtime ${JSON.stringify({ ts: new Date().toISOString(), evt: 'self-install', bin: r.binPath, manifest: r.manifestPath, binMode: r.binMode, root: r.root, docs: r.docs })}\n`,
   )
 }
 

@@ -23,8 +23,9 @@
 import { spawnSync } from 'child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, statSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
-import { BIN_NAME } from './constants.ts'
+import { dirname, join } from 'path'
+import { BIN_NAME, PACKAGE_NAME } from './constants.ts'
+import { scaffoldHostDocs, type HostDocsResult } from './hostDocs.ts'
 import { buildManifest, resolveIapeerRoot, writeManifestAtomic } from './manifest.ts'
 
 /** The launcher binary name (`telegram-runtime`). Re-exported so callers/tests have a
@@ -40,6 +41,10 @@ export interface SelfInstallOptions {
   /** The running interpreter / compiled bin (default process.execPath). When the
    *  source path is real and this is `bun`, it is the compiler we invoke. */
   execPath?: string
+  /** FU6 on-host docs source dir. Default: `<package-root>/docs` derived from
+   *  `sourceEntry` (`<pkg>/src/cli.ts` → `<pkg>/docs`). Missing (e.g. running from a
+   *  compiled bin with no source tree) → soft-skip, never fails the install. */
+  docsSource?: string
 }
 
 export type SelfInstallBinMode = 'compiled' | 'copied-self'
@@ -50,6 +55,8 @@ export interface SelfInstallResult {
   binMode: SelfInstallBinMode
   root: string
   binDir: string
+  /** FU6 on-host docs scaffolding verdict (best-effort; never blocks the install). */
+  docs: HostDocsResult
 }
 
 /** Resolve the bin dir: IAPEER_BIN_DIR override → else ~/.local/bin. */
@@ -104,6 +111,8 @@ function hashStr(s: string): number {
 export function selfInstall(opts: SelfInstallOptions = {}): SelfInstallResult {
   const env = opts.env ?? process.env
   const sourceEntry = opts.sourceEntry ?? join(import.meta.dir, 'cli.ts')
+  // `<pkg>/docs` from the source entry's package root (`<pkg>/src/cli.ts` → `<pkg>/docs`).
+  const docsSource = opts.docsSource ?? join(dirname(sourceEntry), '..', 'docs')
   const execPath = opts.execPath ?? process.execPath
   const binDir = resolveBinDir(env)
   const binPath = join(binDir, BIN_NAME)
@@ -145,5 +154,20 @@ export function selfInstall(opts: SelfInstallOptions = {}): SelfInstallResult {
   const manifest = buildManifest(binPath)
   const manifestPath = writeManifestAtomic(manifest, env)
 
-  return { binPath, manifestPath, binMode, root: resolveIapeerRoot(env), binDir }
+  // FU6 on-host docs — stage this version's public docs to <root>/docs/telegram-runtime/.
+  // Best-effort: scaffoldHostDocs already soft-skips missing source / copy errors; the
+  // try/catch additionally swallows the fail-closed sandbox guard so a docs problem can
+  // NEVER fail the install (bin + manifest are the install contract, docs are a bonus).
+  let docs: HostDocsResult
+  try {
+    docs = scaffoldHostDocs(PACKAGE_NAME, docsSource, env)
+  } catch (e) {
+    docs = {
+      copied: false,
+      dest: join(resolveIapeerRoot(env), 'docs', PACKAGE_NAME),
+      reason: e instanceof Error ? e.message : String(e),
+    }
+  }
+
+  return { binPath, manifestPath, binMode, root: resolveIapeerRoot(env), binDir, docs }
 }

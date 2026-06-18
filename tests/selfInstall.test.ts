@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'child_process'
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { BIN_NAME, resolveBinDir, selfInstall } from '../src/selfInstall.ts'
@@ -24,7 +24,9 @@ describe('selfInstall (real compile)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'tg-install-'))
     const root = join(dir, 'iapeer-root')
     const binDir = join(dir, 'bin')
-    const env = { ...process.env, HOME: dir, IAPEER_ROOT: root, IAPEER_BIN_DIR: binDir }
+    // IAPEER_TEST_SANDBOX=1 arms the fail-closed docs guard; IAPEER_ROOT points it at the
+    // tmp root so the guard passes (it only throws for the REAL ~/.iapeer).
+    const env = { ...process.env, HOME: dir, IAPEER_ROOT: root, IAPEER_BIN_DIR: binDir, IAPEER_TEST_SANDBOX: '1' }
     return { env, root, binDir, dir }
   }
 
@@ -48,6 +50,13 @@ describe('selfInstall (real compile)', () => {
         expect(manifest.runtime).toBe('telegram')
         expect(manifest.selfConfig).toEqual({ command: r.binPath, args: ['self-config'] })
         expect(manifest.peers).toBeUndefined()
+
+        // FU6 on-host docs scaffolded from the package's real docs/ (next to the source
+        // entry) into <root>/docs/telegram-runtime/, EXCLUDING internals.
+        expect(r.docs.copied).toBe(true)
+        expect(r.docs.dest).toBe(join(root, 'docs', 'telegram-runtime'))
+        expect(statSync(join(r.docs.dest, 'README.md')).isFile()).toBe(true)
+        expect(existsSync(join(r.docs.dest, 'internals'))).toBe(false)
 
         // the compiled bin actually runs (self-contained snapshot, grammy bundled)
         const help = spawnSync(r.binPath, ['--help'], { encoding: 'utf8' })
