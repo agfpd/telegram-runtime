@@ -1,6 +1,6 @@
 {
   "name": "@agfpd/telegram-runtime",
-  "version": "0.16.5",
+  "version": "0.16.6",
   "description": "Telegram runtime-router for IAP peers.",
   "license": "Apache-2.0",
   "type": "module",
@@ -10,6 +10,8 @@
   "files": [
     "bin/",
     "src/",
+    "docs/*.md",
+    "docs/ru/",
     "tsconfig.json"
   ],
   "scripts": {
