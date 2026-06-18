@@ -81,15 +81,16 @@ describe('runSelfConfig', () => {
       expect(envText).toContain('TELEGRAM_BOT_USERNAME=maria_bot')
       const profile = JSON.parse(readFileSync(r.profilePath, 'utf8'))
       expect(profile.interfaces.telegram.bot).toBe('maria-bot')
-      // human-readable identity NEXT to the machine alias (schema parity with
-      // the `interface bot` verb): real @username, bare (no `@`)
-      expect(profile.interfaces.telegram.bot_username).toBe('maria_bot')
+      // The @username is NOT duplicated into the profile — even though it was supplied
+      // and written to the credential .env above, the profile carries ONLY the catalog
+      // key. @username is derived from the .env for display (no write-only dup).
+      expect('bot_username' in profile.interfaces.telegram).toBe(false)
     } finally {
       rmSync(cwd, { recursive: true, force: true })
     }
   })
 
-  test('does NOT write bot_username when TELEGRAM_BOT_USERNAME is absent', () => {
+  test('profile never carries bot_username (also when no @username is supplied)', () => {
     const cwd = sandboxCwd()
     try {
       const r = runSelfConfig({

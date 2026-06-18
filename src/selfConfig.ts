@@ -144,10 +144,10 @@ export function runSelfConfig(opts: SelfConfigOptions = {}): SelfConfigOutcome {
       : {}
   if (userId) telegram.user_id = userId
   if (bot) telegram.bot = bot
-  // Human-readable identity NEXT to the machine alias (same schema as the
-  // `interface bot` verb): the real @username, bare (no `@`), when the operator
-  // supplied it alongside the bot key. Never blanks an existing value.
-  if (bot && username) telegram.bot_username = username
+  // The profile stores ONLY the bot catalog key. The @username is NOT copied here (it
+  // would be a write-only duplicate): it is persisted once in the bot credential .env
+  // below (writeBotCredential → TELEGRAM_BOT_USERNAME) and derived from there for any
+  // human-readable display.
   ;(interfaces as Record<string, unknown>).telegram = telegram
 
   // Identity stays the foundation's domain — spread the raw profile FIRST so every

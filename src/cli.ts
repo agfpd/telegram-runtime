@@ -82,14 +82,13 @@ type Flags = Record<string, string | boolean | string[]>
 
 type TelegramInterface = {
   user_id?: string
+  // The bot CATALOG KEY (operator-chosen alias, NAME_RE grammar) — the stable local
+  // handle that names the credential dir bots/<key>/.env (token + getMe @username) and
+  // keys inbound/outbound routing. NOT the @username and NOT the token. The real
+  // human-readable @username is NOT stored here (it would be a write-only duplicate of
+  // the .env): it lives once in bots/<key>/.env TELEGRAM_BOT_USERNAME (filled by `bot
+  // add` via getMe) and is DERIVED for display from there (see `bot list`).
   bot?: string
-  // The REAL Telegram @username of the linked bot (stored bare, without `@`, as
-  // getMe returns it — display layers add the `@`). Sits NEXT to `bot`, never
-  // replaces it: `bot` stays the machine catalog key (bots/<alias>/), this field
-  // is the human-readable identity (a catalog alias means nothing to a human).
-  // Filled from the bot's .env TELEGRAM_BOT_USERNAME (which `bot add` fills from
-  // getMe) — absent for legacy bots whose .env predates the getMe validation.
-  bot_username?: string
   // Agent-activity progress channel (second, separate channel — NOT
   // send_to_peer). Tri-state on purpose: `true`/`false` is an explicit
   // per-peer operator choice (set via the `/activity` chat command), `undefined`
@@ -3121,14 +3120,11 @@ async function interfaceCommand(args: string[]): Promise<void> {
     const cwd = dirname(dirname(path))
     const profile = readPeerProfile(cwd)
     if (!profile) throw new TelegramRuntimeError(`${path} missing`)
-    // Carry the bot's real @username into the profile alongside the alias — the
-    // .env field is filled by `bot add` (getMe); legacy bots without it just
-    // don't get the field (no fail, no blanking of a previously set value).
-    const botUsername = readEnvFile(botEnvPath(botKey)).TELEGRAM_BOT_USERNAME
-    const updated = setTelegramInterface(profile, {
-      bot: botKey,
-      ...(botUsername ? { bot_username: botUsername } : {}),
-    })
+    // The profile stores ONLY the bot catalog key. The bot's real @username is NOT
+    // copied here (that was a write-only duplicate of bots/<key>/.env): it lives once
+    // in the credential .env (filled by `bot add` via getMe) and is derived from there
+    // for any human-readable display (see `bot list`).
+    const updated = setTelegramInterface(profile, { bot: botKey })
     writePeerProfile(cwd, updated)
     printJson(updated)
     return
