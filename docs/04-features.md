@@ -1,0 +1,41 @@
+# 04 — Features
+
+[Русский](ru/04-возможности.md) · **English**
+
+On top of plain text delivery, the bridge makes talking to an agent from Telegram feel alive.
+
+## Voice
+
+A voice message from the person is **transcribed to text** (through a speech-recognition service) and delivered to the agent as an ordinary message, marked as having been speech. If transcription isn't available, the file itself goes to the agent. The other way: when the agent sends a voice file, the bridge delivers it to the chat as a voice message with a player.
+
+Speech recognition is wired up with the address of an external service; without it, voice arrives as a file. There's also a local fallback transcriber. See [07 — Configuration](07-configuration.md).
+
+## Typing indicator
+
+While the agent works on a reply, the chat shows a typing indicator — as in a conversation with a person. The bridge watches the agent's session and shows the indicator while it's busy, clearing it when the agent is done. So you can see the request was received and is being processed, not lost.
+
+## Activity stream
+
+Optionally the bridge shows what the agent is doing right now — which tools it's using, what step it's on. It's toggled straight from the chat with `/activity` (`on` / `off` / `status`). It's on by default; turn it off if you don't want it.
+
+## Control commands from the chat
+
+You can manage the agent's session straight from Telegram:
+
+- **`/stop`** (or the word "стоп"/"stop") — interrupt the agent's current turn without losing context;
+- **`/new`** — restart the agent with a fresh session;
+- **`/compact`** — compact the conversation context.
+
+The bridge intercepts these commands and executes them through iapeer, without delivering them to the agent as text.
+
+## Alias shortcuts
+
+Beyond the control commands, the owner can set up **aliases** — short shortcuts that expand into preset text before delivery to the agent. For example `/alias-new` might expand to "Save your state to memory and restart fresh." Aliases are set in the peer profile and re-read on every message, so editing an alias takes effect at once, with no restart.
+
+## Attachments
+
+Files and images travel both ways. Inbound from the person (photos, documents, audio, video) the bridge downloads and passes to the agent; outbound from the agent it sends to the chat, picking the type by extension — a voice message, an audio track, an image, or a document. The size limit is 50 MB per file.
+
+## Text formatting
+
+The agent's replies arrive formatted — headings, lists, code, links render as they should in Telegram. The agent writes plain markdown; the bridge converts it to what Telegram displays correctly, splitting long messages into parts when needed.

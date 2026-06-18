@@ -1,0 +1,30 @@
+{
+  "name": "@agfpd/telegram-runtime",
+  "version": "0.16.5",
+  "description": "Telegram runtime-router for IAP peers.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "telegram-runtime": "bin/telegram-runtime"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "tsconfig.json"
+  ],
+  "scripts": {
+    "start": "bun src/cli.ts run",
+    "self-install": "bun src/cli.ts self-install",
+    "self-config": "bun src/cli.ts self-config",
+    "doctor": "bun src/cli.ts doctor --json",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "grammy": "^1.21.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+.DS_Store
+*.log
+
+# Agent/runtime-local state — host-specific, never part of the public package
+.iapeer/
+.claude/
+.codex/
+.mcp.json
+
+# Internals docs — not part of the public release
+docs/internals/
