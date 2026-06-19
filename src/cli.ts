@@ -103,8 +103,8 @@ type TelegramInterface = {
   // aliases here were misfiled in the passport section. Read as a fallback
   // until iapeer's fleet-wide data migration lands, then this field (and the
   // fallback in resolveAliases()) can be dropped. Alias keys live in the
-  // `/alias-*` namespace; bare slash keys (`/new`, `/compact`) are reserved
-  // for the control layer.
+  // `/alias_*` namespace (underscore — Telegram registered commands forbid `-`);
+  // bare slash keys (`/new`, `/compact`) are reserved for the control layer.
   aliases?: Record<string, string>
 }
 
@@ -2623,7 +2623,7 @@ async function handleInboundMessage(args: {
     // Bare `/new` / `/compact` → lifecycle CONTROL (emergency handle for a
     // wedged peer), intercepted before alias expansion and IAP delivery by the
     // two-level contract: a pure slash command is never a prompt. The
-    // `/alias-*` prompt shortcuts are untouched (they expand below).
+    // `/alias_*` prompt shortcuts are untouched (they expand below).
     const lifecycleCmd = parseLifecycleCommand(args.text)
     if (lifecycleCmd) {
       await handleLifecycleCommand(args.bot, args.ctx.ownerUserId, target, lifecycleCmd)
