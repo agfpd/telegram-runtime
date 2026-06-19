@@ -2211,7 +2211,7 @@ export function isStopCommand(text: string): boolean {
 // control, never a prompt. These are the emergency handles: an unconditional
 // fresh-session / context-compact for a peer whose prompt channel is wedged
 // (hung turn, dead session), where a prompt-path shortcut cannot reach it.
-// The prompt-path shortcuts live under `/alias-*` (expansion.aliases) and are
+// The prompt-path shortcuts live under `/alias_*` (expansion.aliases) and are
 // NOT affected. FLEET-SAFETY mirrors isStopCommand: only the pure command
 // (optionally with Telegram's appended @botname) is control; any argument or
 // trailing text fails the match and flows through normal delivery.
@@ -2220,6 +2220,23 @@ export function parseLifecycleCommand(text: string): 'new' | 'compact' | null {
   if (/^\/new(?:@\w+)?$/i.test(t)) return 'new'
   if (/^\/compact(?:@\w+)?$/i.test(t)) return 'compact'
   return null
+}
+
+// The agent runtimes a peer can be HARD-switched to from Telegram. `telegram` is a
+// presence runtime (the human side), never a switch target. A bare `/<runtime>`
+// (e.g. `/codex`) is a CONTROL command in the two-level model — a reserved bare-slash
+// name, distinct from the `/alias_*` prompt namespace.
+const RUNTIME_SWITCH_RUNTIMES = ['claude', 'codex'] as const
+
+// Parse a hard runtime-switch control command: a BARE `/claude` / `/codex` (optionally
+// with Telegram's appended @botname), nothing else. Returns the target runtime, or null
+// when the text is not a known-runtime switch. Validation that the TARGET peer actually
+// declares the runtime happens in the handler (clean per-peer feedback). Same
+// fleet-safety as the lifecycle/stop parsers: any argument or trailing text fails.
+export function parseRuntimeSwitchCommand(text: string): string | null {
+  const m = /^\/([a-z]+)(?:@\w+)?$/.exec(text.trim().toLowerCase())
+  if (!m) return null
+  return (RUNTIME_SWITCH_RUNTIMES as readonly string[]).includes(m[1]) ? m[1] : null
 }
 
 async function handleActivityCommand(
@@ -2425,6 +2442,58 @@ export async function handleLifecycleCommand(
   await bot.api.sendMessage(chatId, feedback).catch(() => {})
 }
 
+// Hard runtime switch (control): `iapeer new <peer> <toRuntime>` — mechanically restart
+// the peer ON the target runtime. Same shape as handleLifecycleCommand('new') but with
+// an EXPLICIT target runtime instead of the peer's current one (iapeer's `new` honours
+// the passed runtime: `rt = runtime ?? peer.runtime`, refusing undeclared/foreign). We
+// pre-check the peer DECLARES the runtime so the operator gets clean per-peer feedback
+// rather than iapeer's refusal text. Any failure is surfaced and swallowed — control
+// must never throw into the delivery path.
+export async function handleRuntimeSwitchCommand(
+  bot: Bot,
+  chatId: string,
+  target: PeerRecord,
+  toRuntime: string,
+): Promise<void> {
+  if (target.runtime === toRuntime) {
+    await bot.api.sendMessage(chatId, `already on ${toRuntime}`).catch(() => {})
+    return
+  }
+  const declared = target.runtimes?.length ? target.runtimes : [target.runtime]
+  if (!declared.includes(toRuntime)) {
+    await bot.api
+      .sendMessage(chatId, `${target.personality} does not declare runtime ${toRuntime} (has: ${declared.join(', ')})`)
+      .catch(() => {})
+    return
+  }
+  const bin = resolveIapeerBin()
+  await bot.api.sendMessage(chatId, `switching to ${toRuntime}...`).catch(() => {})
+  const result = await runControlBinary(bin, ['new', target.personality, toRuntime], LIFECYCLE_TIMEOUT_MS.new)
+  const stdout = result.stdout.trim()
+  const stderr = result.stderr.trim()
+  logActivity('runtime-switch', {
+    peer: target.personality,
+    from: target.runtime,
+    to: toRuntime,
+    status: result.status,
+    timedOut: result.timedOut,
+    error: result.error?.message,
+  })
+  let feedback: string
+  if (result.error) {
+    feedback = `switch failed: ${result.error.message}`
+  } else if (result.timedOut) {
+    feedback = `switch to ${toRuntime} timed out after ${Math.round(LIFECYCLE_TIMEOUT_MS.new / 1000)}s — check the session`
+  } else if (result.status === 0) {
+    feedback = `switched to ${toRuntime} — fresh session up`
+  } else if (/offline/i.test(stderr) || /offline/i.test(stdout)) {
+    feedback = 'not in an active session'
+  } else {
+    feedback = `switch to ${toRuntime} failed: ${stderr || stdout || `exit ${result.status}`}`
+  }
+  await bot.api.sendMessage(chatId, feedback).catch(() => {})
+}
+
 // Transcribe an inbound voice file to text. Tiered, all knobs via env:
 //   1. TELEGRAM_STT_ENDPOINT — OpenAI-compatible POST /v1/audio/transcriptions
 //      (e.g. speaches / faster-whisper-server). Direct fetch, NOT runtimeFetch:
@@ -2560,6 +2629,15 @@ async function handleInboundMessage(args: {
       await handleLifecycleCommand(args.bot, args.ctx.ownerUserId, target, lifecycleCmd)
       return
     }
+    // Bare `/claude` / `/codex` → HARD runtime switch CONTROL (mechanical restart of the
+    // peer on the target runtime via `iapeer new <peer> <rt>`), intercepted before alias
+    // expansion by the two-level contract. The soft, cooperative switch is an owner
+    // `/alias_*` whose prompt does handoff → `iapeer default-runtime` → `iapeer self-fresh`.
+    const switchRuntime = parseRuntimeSwitchCommand(args.text)
+    if (switchRuntime) {
+      await handleRuntimeSwitchCommand(args.bot, args.ctx.ownerUserId, target, switchRuntime)
+      return
+    }
   }
 
   const attachments: string[] = []
@@ -2609,6 +2687,11 @@ async function handleInboundMessage(args: {
     )
   }
 
+  // Piggyback a slash-menu re-sync on owner interaction: the profile was just read, so
+  // an alias/runtime edit reflects in the menu immediately (not only on the periodic
+  // tick). Best-effort and a no-op when the menu is unchanged.
+  void syncBotCommands(args.ctx, args.botKey, args.bot)
+
   enqueueIapSend(async () => {
     const result = await runIapSend(args.ctx, target.personality, deliveredText, attachments)
     if (!result.ok) {
@@ -2643,6 +2726,95 @@ async function handleInboundMessage(args: {
   )
   const isOperator = (personality: string): boolean => operatorTargets.has(personality)
   void watchPeerTurn(args.bot, args.ctx.ownerUserId, target, isOperator)
+}
+
+// ─── Slash-menu auto-registration (setMyCommands) ────────────────────────────
+// Each bot's Telegram slash menu is auto-built from the commands that ALREADY work in
+// the channel — control + hard runtime-switch + the peer's `/alias_*` prompt shortcuts —
+// so the owner gets a discoverable, autocompleted menu instead of having to know them by
+// heart. Scoped to the owner's private chat (BotCommandScopeChat) so non-owners never
+// see control. It surfaces the existing two-level model; it adds no new semantics.
+
+// Telegram allows ONLY [a-z0-9_], 1–32 chars, in a REGISTERED command name (hyphen is
+// rejected — core.telegram.org/bots/features). Aliases live under `/alias_*`; any key
+// that still violates the grammar is skipped (logged) so one bad alias cannot make
+// setMyCommands reject the whole batch.
+function isValidCommandName(name: string): boolean {
+  return /^[a-z0-9_]{1,32}$/.test(name)
+}
+
+// A Telegram command description is 1–256 chars. Collapse the alias prompt to one line
+// and truncate — a readable hint of what the alias does.
+function commandDescription(text: string): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  const d = oneLine.length > 0 ? oneLine : 'prompt alias'
+  return d.length > 256 ? `${d.slice(0, 253)}...` : d
+}
+
+// Build a bot's slash menu for the peer bound to it: control commands + hard
+// runtime-switch (one per DECLARED agent runtime, only when ≥2 so there is a real
+// choice) + the peer's prompt aliases (canonical expansion.aliases via resolveAliases).
+// Invalid command names are filtered.
+export function buildBotCommands(
+  target: PeerRecord,
+  profile: PeerProfile | null,
+): { command: string; description: string }[] {
+  const cmds: { command: string; description: string }[] = [
+    { command: 'new', description: 'restart the session (fresh, unconditional)' },
+    { command: 'compact', description: 'compact the session context' },
+    { command: 'stop', description: 'interrupt the current turn' },
+    { command: 'activity', description: 'toggle the activity stream (on/off/status)' },
+  ]
+  const declaredAgentRuntimes = (target.runtimes?.length ? target.runtimes : [target.runtime]).filter(rt =>
+    (RUNTIME_SWITCH_RUNTIMES as readonly string[]).includes(rt),
+  )
+  if (declaredAgentRuntimes.length >= 2) {
+    for (const rt of declaredAgentRuntimes) {
+      cmds.push({ command: rt, description: `switch this peer to ${rt} (restart)` })
+    }
+  }
+  const aliases = resolveAliases(profile)
+  if (aliases) {
+    for (const [key, prompt] of Object.entries(aliases)) {
+      const name = key.startsWith('/') ? key.slice(1) : key
+      if (!isValidCommandName(name)) {
+        process.stderr.write(
+          `telegram-runtime: skipping alias "${key}" — not a valid Telegram command name [a-z0-9_]{1,32}\n`,
+        )
+        continue
+      }
+      cmds.push({ command: name, description: commandDescription(prompt) })
+    }
+  }
+  return cmds
+}
+
+// Last-registered command signature per bot, so a sync calls setMyCommands ONLY when the
+// menu changed. Start, periodic re-sync, and inbound piggyback all funnel through here.
+const registeredCommands = new Map<string, string>()
+
+// Register (or refresh) a bot's owner-scoped slash menu. Best-effort: a missing target,
+// unreadable profile, or Telegram API error is logged and swallowed — the menu is a
+// convenience and must NEVER break polling or delivery.
+async function syncBotCommands(ctx: RuntimeContext, botKey: string, bot: Bot): Promise<void> {
+  try {
+    const target = readPeerDirectory().byTelegramBot.get(botKey)
+    if (!target) return
+    let profile: PeerProfile | null = null
+    try {
+      profile = readPeerProfile(target.cwd)
+    } catch {
+      // malformed profile → still register control + runtime-switch (aliases skipped)
+    }
+    const commands = buildBotCommands(target, profile)
+    const signature = JSON.stringify(commands)
+    if (registeredCommands.get(botKey) === signature) return
+    await bot.api.setMyCommands(commands, { scope: { type: 'chat', chat_id: Number(ctx.ownerUserId) } })
+    registeredCommands.set(botKey, signature)
+    logActivity('commands-sync', { bot: botKey, peer: target.personality, count: commands.length })
+  } catch (err) {
+    process.stderr.write(`telegram-runtime: setMyCommands failed for ${botKey}: ${formatError(err)}\n`)
+  }
 }
 
 function installBotHandlers(ctx: RuntimeContext, botKey: string, bot: Bot, credential: BotCredential): void {
@@ -3261,7 +3433,9 @@ async function runCommand(): Promise<void> {
   const credentials = new Map<string, BotCredential>()
   const bots = new Map<string, Bot>()
   const releaseLocks: ReleaseLock[] = []
+  let commandsSyncTimer: ReturnType<typeof setInterval> | undefined
   const cleanup = () => {
+    if (commandsSyncTimer) clearInterval(commandsSyncTimer)
     for (const release of releaseLocks.splice(0).reverse()) release()
   }
   process.once('exit', cleanup)
@@ -3295,6 +3469,15 @@ async function runCommand(): Promise<void> {
   process.stderr.write(
     `telegram-runtime: running ${RUNTIME}-${owner.personality}; bots=${Array.from(bots.keys()).join(', ')}\n`,
   )
+  // Slash-menu (setMyCommands): register each bot's owner-scoped menu on start, then
+  // re-sync on an interval so an owner edit to a peer-profile's aliases/runtimes lands
+  // in the menu without a runtime restart (each sync re-registers ONLY on change).
+  for (const [botKey, bot] of bots) void syncBotCommands(ctx, botKey, bot)
+  const commandsSyncMs = Number(process.env.TELEGRAM_COMMANDS_SYNC_MS ?? '') || 30_000
+  commandsSyncTimer = setInterval(() => {
+    for (const [botKey, bot] of bots) void syncBotCommands(ctx, botKey, bot)
+  }, commandsSyncMs)
+  commandsSyncTimer.unref?.()
   await Promise.all(Array.from(bots.entries()).map(([key, bot]) => startPolling(key, bot)))
 }
 
