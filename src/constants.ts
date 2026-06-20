@@ -32,5 +32,16 @@ export const PACKAGE_NAME: string = pkg.name.split('/').pop() ?? pkg.name
  *  (/^[a-z][a-z0-9-]{0,31}$/). */
 export const NAME_RE = /^[a-z][a-z0-9-]{0,31}$/
 
+/** Telegram bot @username grammar — the natural key of a telegram bot (decision
+ *  2026-06-20: `bot_username` replaces the redundant `bot` catalog key). Telegram
+ *  usernames are 5–32 chars, [A-Za-z0-9_], start with a letter, do NOT end in an
+ *  underscore (bot usernames conventionally end in "bot"). DISTINCT from NAME_RE:
+ *  it permits underscores (which peer names forbid) and forbids hyphens (which peer
+ *  names allow) — that disjointness is load-bearing, it lets listBotKeys tell a
+ *  username-named credential dir from a legacy personality-named one during the
+ *  transition. @username lookups are case-insensitive in Telegram, so keys are
+ *  normalized to lowercase before use (see normalizeBotUsername). */
+export const BOT_USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{3,30}[A-Za-z0-9]$/
+
 export const IAPEER_DIR = '.iapeer'
 export const PEER_PROFILE_FILE = 'peer-profile.json'

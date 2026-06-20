@@ -48,7 +48,7 @@ describe('runSelfConfig', () => {
   test('idempotent: a repeat run is byte-stable', () => {
     const cwd = sandboxCwd()
     try {
-      const env = { IAPEER_PEER_PERSONALITY: 'maria', TELEGRAM_USER_ID: '12345', TELEGRAM_BOT: 'maria-bot' }
+      const env = { IAPEER_PEER_PERSONALITY: 'maria', TELEGRAM_USER_ID: '12345', TELEGRAM_BOT_USERNAME: 'maria_bot' }
       const r1 = runSelfConfig({ env, cwd })
       const a = readFileSync(r1.profilePath, 'utf8')
       const r2 = runSelfConfig({ env, cwd })
@@ -59,7 +59,7 @@ describe('runSelfConfig', () => {
     }
   })
 
-  test('links a bot and writes its credential .env under IAPEER_ROOT-aware bots registry', () => {
+  test('links a bot by @username key and writes its credential .env under IAPEER_ROOT-aware bots registry', () => {
     const cwd = sandboxCwd()
     const root = join(cwd, 'iapeer-root')
     try {
@@ -68,38 +68,75 @@ describe('runSelfConfig', () => {
           IAPEER_PEER_PERSONALITY: 'maria',
           IAPEER_ROOT: root,
           TELEGRAM_USER_ID: '12345',
-          TELEGRAM_BOT: 'maria-bot',
           TELEGRAM_BOT_TOKEN: '999:ABCDEF',
           TELEGRAM_BOT_USERNAME: 'maria_bot',
         },
         cwd,
       })
-      expect(r.bot).toBe('maria-bot')
-      expect(r.botEnvPath).toBe(join(root, 'runtimes', 'telegram', 'bots', 'maria-bot', '.env'))
+      // @username is the catalog key: it names the credential dir AND the profile field.
+      expect(r.botUsername).toBe('maria_bot')
+      expect(r.botEnvPath).toBe(join(root, 'runtimes', 'telegram', 'bots', 'maria_bot', '.env'))
       const envText = readFileSync(r.botEnvPath!, 'utf8')
       expect(envText).toContain('TELEGRAM_BOT_TOKEN=999:ABCDEF')
       expect(envText).toContain('TELEGRAM_BOT_USERNAME=maria_bot')
       const profile = JSON.parse(readFileSync(r.profilePath, 'utf8'))
-      expect(profile.interfaces.telegram.bot).toBe('maria-bot')
-      // The @username is NOT duplicated into the profile — even though it was supplied
-      // and written to the credential .env above, the profile carries ONLY the catalog
-      // key. @username is derived from the .env for display (no write-only dup).
-      expect('bot_username' in profile.interfaces.telegram).toBe(false)
+      expect(profile.interfaces.telegram.bot_username).toBe('maria_bot')
+      // The retired `bot` field is never written.
+      expect('bot' in profile.interfaces.telegram).toBe(false)
     } finally {
       rmSync(cwd, { recursive: true, force: true })
     }
   })
 
-  test('profile never carries bot_username (also when no @username is supplied)', () => {
+  test('normalizes a @-prefixed / mixed-case username to the lowercase key', () => {
     const cwd = sandboxCwd()
     try {
       const r = runSelfConfig({
-        env: { IAPEER_PEER_PERSONALITY: 'maria', TELEGRAM_BOT: 'maria-bot' },
+        env: { IAPEER_PEER_PERSONALITY: 'maria', TELEGRAM_BOT_USERNAME: '@Maria_Bot' },
+        cwd,
+      })
+      expect(r.botUsername).toBe('maria_bot')
+      const profile = JSON.parse(readFileSync(r.profilePath, 'utf8'))
+      expect(profile.interfaces.telegram.bot_username).toBe('maria_bot')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('legacy TELEGRAM_BOT (no explicit username) is accepted as the bot_username key', () => {
+    const cwd = sandboxCwd()
+    try {
+      const r = runSelfConfig({
+        env: { IAPEER_PEER_PERSONALITY: 'maria', TELEGRAM_BOT: 'maria_bot' },
         cwd,
       })
       const profile = JSON.parse(readFileSync(r.profilePath, 'utf8'))
-      expect(profile.interfaces.telegram.bot).toBe('maria-bot')
-      expect('bot_username' in profile.interfaces.telegram).toBe(false)
+      expect(profile.interfaces.telegram.bot_username).toBe('maria_bot')
+      expect('bot' in profile.interfaces.telegram).toBe(false)
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('strips a retired `bot` field from an existing profile on re-config', () => {
+    const cwd = sandboxCwd()
+    try {
+      const profilePath = join(cwd, '.iapeer', 'peer-profile.json')
+      mkdirSync(join(cwd, '.iapeer'), { recursive: true })
+      writeFileSync(
+        profilePath,
+        JSON.stringify({
+          personality: 'maria',
+          runtime: 'telegram',
+          intelligence: 'natural',
+          interfaces: { telegram: { bot: 'maria', activity: true } },
+        }),
+      )
+      runSelfConfig({ env: { IAPEER_PEER_PERSONALITY: 'maria', TELEGRAM_BOT_USERNAME: 'maria_bot' }, cwd })
+      const profile = JSON.parse(readFileSync(profilePath, 'utf8'))
+      expect(profile.interfaces.telegram.bot_username).toBe('maria_bot')
+      expect('bot' in profile.interfaces.telegram).toBe(false) // retired key removed
+      expect(profile.interfaces.telegram.activity).toBe(true) // unrelated field preserved
     } finally {
       rmSync(cwd, { recursive: true, force: true })
     }

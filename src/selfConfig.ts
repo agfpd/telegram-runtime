@@ -19,11 +19,13 @@
 // clobber it (exactly the pilot-notifier lesson: preserve, don't re-derive identity).
 //
 // OPERATOR INPUTS come via env at `iapeer create` time (the foundation forwards the
-// whole env into the hook): TELEGRAM_USER_ID → interfaces.telegram.user_id, TELEGRAM_BOT
-// → interfaces.telegram.bot (bot key), TELEGRAM_BOT_TOKEN (+ optional
-// TELEGRAM_BOT_USERNAME) → the bot credential .env under the IAPEER_ROOT-aware bots
-// registry. Absent inputs → the hook is still `configured` (a no-op that confirms
-// state); the operator can complete user_id/bot later via the `interface`/`bot` verbs.
+// whole env into the hook): TELEGRAM_USER_ID → interfaces.telegram.user_id; the bot
+// @username (TELEGRAM_BOT_USERNAME, or the legacy TELEGRAM_BOT key as a fallback) →
+// interfaces.telegram.bot_username — the NATURAL KEY that also names the credential dir
+// bots/<username>/.env (decision 2026-06-20). TELEGRAM_BOT_TOKEN → that credential .env
+// under the IAPEER_ROOT-aware bots registry. Absent inputs → the hook is still
+// `configured` (a no-op that confirms state); the operator can complete user_id/bot
+// later via the `interface`/`bot` verbs.
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
@@ -42,13 +44,22 @@ export interface SelfConfigOutcome {
   profilePath: string
   /** What was written into interfaces.telegram this run (for the CLI summary/log). */
   userId?: string
-  bot?: string
+  botUsername?: string
   /** Path of the bot credential .env, when a TELEGRAM_BOT_TOKEN was provided. */
   botEnvPath?: string
 }
 
 function trimmed(value: string | undefined): string | undefined {
   const v = value?.trim()
+  return v && v.length > 0 ? v : undefined
+}
+
+/** Normalize a telegram @username to its catalog/dir key form: trim, strip a leading
+ *  '@', lowercase (Telegram usernames are case-insensitive; on-disk keys must be
+ *  deterministic). Mirrors cli.ts normalizeBotUsername; kept local so this contract
+ *  module stays free of the grammy run-loop in cli.ts. */
+function normalizeBotUsername(value: string | undefined): string | undefined {
+  const v = value?.trim().replace(/^@/, '').toLowerCase()
   return v && v.length > 0 ? v : undefined
 }
 
@@ -119,14 +130,15 @@ export function runSelfConfig(opts: SelfConfigOptions = {}): SelfConfigOutcome {
 
   const profile = readRawProfile(profilePath)
 
-  // Operator-supplied telegram presence (env, forwarded by the foundation).
+  // Operator-supplied telegram presence (env, forwarded by the foundation). The bot
+  // @username is the natural key: prefer TELEGRAM_BOT_USERNAME, fall back to the legacy
+  // TELEGRAM_BOT key (provisioning that predates the cutover).
   const userId = trimmed(env.TELEGRAM_USER_ID)
-  const bot = trimmed(env.TELEGRAM_BOT)
+  const botUsername = normalizeBotUsername(env.TELEGRAM_BOT_USERNAME) ?? normalizeBotUsername(env.TELEGRAM_BOT)
   const token = trimmed(env.TELEGRAM_BOT_TOKEN)
-  const username = trimmed(env.TELEGRAM_BOT_USERNAME)
 
   // Merge interfaces.telegram (preserve any existing telegram fields, e.g. an operator-
-  // set `activity` flag). Only set user_id/bot when provided — never blank out.
+  // set `activity` flag). Only set user_id/bot_username when provided — never blank out.
   const interfaces =
     profile.interfaces && typeof profile.interfaces === 'object' && !Array.isArray(profile.interfaces)
       ? { ...(profile.interfaces as Record<string, unknown>) }
@@ -137,11 +149,11 @@ export function runSelfConfig(opts: SelfConfigOptions = {}): SelfConfigOutcome {
       ? { ...((interfaces as { telegram: Record<string, unknown> }).telegram) }
       : {}
   if (userId) telegram.user_id = userId
-  if (bot) telegram.bot = bot
-  // The profile stores ONLY the bot catalog key. The @username is NOT copied here (it
-  // would be a write-only duplicate): it is persisted once in the bot credential .env
-  // below (writeBotCredential → TELEGRAM_BOT_USERNAME) and derived from there for any
-  // human-readable display.
+  if (botUsername) telegram.bot_username = botUsername
+  // The @username IS the catalog key and also names the credential dir bots/<username>/.
+  // The retired `bot` field (== personality duplicate) is stripped on every pass so an
+  // idempotent re-config cleans up any legacy value left from before the cutover.
+  delete telegram.bot
   ;(interfaces as Record<string, unknown>).telegram = telegram
 
   // Identity stays the foundation's domain — spread the raw profile FIRST so every
@@ -152,9 +164,11 @@ export function runSelfConfig(opts: SelfConfigOptions = {}): SelfConfigOutcome {
   writeJsonAtomic(profilePath, merged)
 
   let botEnvPath: string | undefined
-  if (bot && token) {
-    botEnvPath = writeBotCredential(env, bot, token, username)
+  if (botUsername && token) {
+    // Credential dir keyed by @username; the .env records the same username so the dir
+    // name and TELEGRAM_BOT_USERNAME stay in lockstep (the invariant migrateBotKeys relies on).
+    botEnvPath = writeBotCredential(env, botUsername, token, botUsername)
   }
 
-  return { personality, profilePath, userId, bot, botEnvPath }
+  return { personality, profilePath, userId, botUsername, botEnvPath }
 }
