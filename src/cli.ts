@@ -1745,6 +1745,11 @@ export function formatTurnDuration(ms: number): string {
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
+// Exponential backoff for the bounded outbound send-retry loops: 1s, 2s, 4s… capped
+// at 5s. Defined once and shared by sendRichResilient + sendChunkResilient so the
+// retry schedule cannot drift between the rich and chunked paths.
+const backoffMs = (attempt: number): number => Math.min(1000 * 2 ** attempt, 5000)
+
 // claude-code "splash" working-verbs. One is picked at random at the start of a
 // turn and stays STATIC for the whole turn (a new turn → a new word). Purely
 // cosmetic header — replaces the old ⚙️ + peer-name line (the operator already
@@ -2912,7 +2917,7 @@ async function startPolling(botKey: string, bot: Bot): Promise<void> {
       process.stderr.write(
         `telegram-runtime: polling ${botKey} failed: ${formatError(err)}, retrying in ${delay / 1000}s\n`,
       )
-      await new Promise(resolveDelay => setTimeout(resolveDelay, delay))
+      await sleep(delay)
     }
   }
 }
@@ -3019,8 +3024,7 @@ export async function sendRichResilient(bot: Bot, chatId: string, text: string):
       )
       if (deterministic) return false
       if (attempt < OUTBOUND_SEND_RETRIES) {
-        const backoff = Math.min(1000 * 2 ** attempt, 5000)
-        await new Promise(resolveDelay => setTimeout(resolveDelay, backoff))
+        await sleep(backoffMs(attempt))
       }
     }
   }
@@ -3122,8 +3126,7 @@ async function sendChunkResilient(
         detail: c.detail,
       })
       if (attempt < OUTBOUND_SEND_RETRIES) {
-        const backoff = Math.min(1000 * 2 ** attempt, 5000)
-        await new Promise(resolveDelay => setTimeout(resolveDelay, backoff))
+        await sleep(backoffMs(attempt))
       }
     }
   }
