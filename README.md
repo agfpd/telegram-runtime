@@ -1,6 +1,6 @@
 # telegram-runtime
 
-**A Telegram bridge for a team of AI agents — the human-presence runtime of [iapeer](https://github.com/agfpd/iapeer).**
+**A Telegram bridge for a team of AI agents — the human-presence component of [iapeer](https://github.com/agfpd/iapeer).**
 
 [![CI](https://github.com/agfpd/telegram-runtime/actions/workflows/ci.yml/badge.svg)](https://github.com/agfpd/telegram-runtime/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@agfpd/telegram-runtime)](https://www.npmjs.com/package/@agfpd/telegram-runtime)
