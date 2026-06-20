@@ -21,11 +21,12 @@ import { basename, dirname, extname, join } from 'path'
 import { spawn, spawnSync } from 'child_process'
 import { selfInstall } from './selfInstall.ts'
 import { runSelfConfig } from './selfConfig.ts'
+// NAME_RE / RUNTIME / IAPEER_DIR / PEER_PROFILE_FILE are the shared ecosystem
+// contract values — single source of truth in constants.ts (the sibling contract
+// modules import them too). Imported here rather than re-declared so a grammar
+// change (e.g. NAME_RE) is made ONCE, not in two places.
+import { IAPEER_DIR, NAME_RE, PEER_PROFILE_FILE, RUNTIME } from './constants.ts'
 
-const NAME_RE = /^[a-z][a-z0-9-]{0,31}$/
-const RUNTIME = 'telegram'
-const IAPEER_DIR = '.iapeer'
-const PEER_PROFILE_FILE = 'peer-profile.json'
 const MAX_TELEGRAM_TEXT = 4096
 // Outbound send hardening: a hung Telegram API call (transient network /
 // proxy glitch) used to block the serial outbound queue forever — the peer
