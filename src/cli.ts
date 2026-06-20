@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from 'fs'
 import { homedir, tmpdir } from 'os'
-import { basename, dirname, extname, join, resolve } from 'path'
+import { basename, dirname, extname, join } from 'path'
 import { spawn, spawnSync } from 'child_process'
 import { selfInstall } from './selfInstall.ts'
 import { runSelfConfig } from './selfConfig.ts'
@@ -167,13 +167,11 @@ type PeersIndex = {
 type BotCredential = {
   key: string
   token: string
-  username?: string
 }
 
 type PeerDirectory = {
   peers: PeerRecord[]
   byPersonality: Map<string, PeerRecord>
-  byTelegramUserId: Map<string, PeerRecord>
   byTelegramBot: Map<string, PeerRecord>
 }
 
@@ -543,16 +541,14 @@ function readPeerDirectory(): PeerDirectory {
   const index = readPeersIndex()
   const peers = (Array.isArray(index.peers) ? index.peers : []).map(hydratePeerRecord)
   const byPersonality = new Map<string, PeerRecord>()
-  const byTelegramUserId = new Map<string, PeerRecord>()
   const byTelegramBot = new Map<string, PeerRecord>()
   for (const peer of peers) {
     if (!peer || typeof peer.personality !== 'string') continue
     byPersonality.set(peer.personality, peer)
     const telegram = telegramInterface(peer)
-    if (telegram.user_id) byTelegramUserId.set(String(telegram.user_id), peer)
     if (telegram.bot) byTelegramBot.set(String(telegram.bot), peer)
   }
-  return { peers, byPersonality, byTelegramUserId, byTelegramBot }
+  return { peers, byPersonality, byTelegramBot }
 }
 
 function findPeerProfilePath(personality: string): string {
@@ -659,7 +655,6 @@ function loadCredential(botKey: string): BotCredential {
   return {
     key: botKey,
     token,
-    ...(env.TELEGRAM_BOT_USERNAME ? { username: env.TELEGRAM_BOT_USERNAME } : {}),
   }
 }
 
@@ -1086,14 +1081,12 @@ function tagContent(xml: string, tag: string): string | undefined {
 }
 
 export function parseIapEnvelope(xml: string): IapEnvelope {
-  // Normalize line endings before parsing. Defensive and transport-agnostic: the
-  // envelope can reach us with CRs instead of LFs (the legacy tmux paste-buffer
-  // rewrote every LF→CR; a raw-mode pty stdin can likewise surface bare CRs), and
-  // Telegram does not render \r as a line break, so multi-line replies (and code
-  // blocks) would collapse to one paragraph. Fold \r\n and lone \r → \n once, over
-  // the whole envelope: message and attachments both come out LF-terminated. The
-  // attachments split (/\r?\n/) and the MarkdownV2 converter are unaffected — they
-  // already key on \n.
+  // Normalize line endings before parsing. Defensive and transport-agnostic: a
+  // raw-mode pty stdin can surface bare CRs instead of LFs, and Telegram does not
+  // render \r as a line break, so multi-line replies (and code blocks) would
+  // collapse to one paragraph. Fold \r\n and lone \r → \n once, over the whole
+  // envelope: message and attachments both come out LF-terminated. The attachments
+  // split (/\r?\n/) and the MarkdownV2 converter are unaffected — they key on \n.
   xml = xml.replace(/\r\n?/g, '\n')
   const open = /^<iap\s+([^>]*)>/.exec(xml.trim())
   if (!open) throw new TelegramRuntimeError('invalid IAP envelope: missing <iap ...>')
@@ -1372,7 +1365,6 @@ function classifyOutboundError(err: unknown): {
   if (err instanceof GrammyError) {
     return { kind: 'api', tgCode: err.error_code, retryAfter: err.parameters?.retry_after, detail }
   }
-  const name = (err as { name?: string } | null)?.name
   const isAbort = (e: unknown): boolean => {
     const n = (e as { name?: string } | null)?.name
     return n === 'TimeoutError' || n === 'AbortError'
@@ -1431,16 +1423,14 @@ function checkpointActivity(personality: string): void {
   activityCheckpoints.get(personality)?.()
 }
 
-// Occupancy source after the tmux→pty hosting migration (boris/iapeer co-design
-// 14.06). The old source was tmux `capture-pane` over /tmp/tmux-iap-*.sock; pty
-// hosting removed the tmux pane, so capture-pane returned null and BOTH progress
-// channels died (typing directly; the tool-call stream because watchPeerTurn's
-// turn-lifecycle gate `done` is owned by this poller — no pane → instant turn-end
-// → activity-loop stops). Replacement: the iapeer supervisor writes each hosted
-// peer's raw child byte-stream to ~/.iapeer/logs/lifecycle/<runtime>-
-// <personality>.log (the SAME stream tmux pipe-pane fed). Keyed by identity
-// exactly as the old socket was. Honours IAPEER_ROOT (sandbox/test). LOAD-BEARING
-// contract owned by iapeer's pty supervisor — path/format changes are coordinated.
+// Occupancy source for both progress channels (typing + the activity stream). Under
+// pty hosting the iapeer supervisor writes each hosted peer's raw child byte-stream to
+// ~/.iapeer/logs/lifecycle/<runtime>-<personality>.log; this poller keys off that
+// file's mtime (see paneLogAgeMs) to gate the turn lifecycle — typing directly, and
+// the tool-call stream because watchPeerTurn's `done` gate is owned here (no live
+// output signal → instant turn-end → activity-loop stops). Keyed by identity. Honours
+// IAPEER_ROOT (sandbox/test). LOAD-BEARING cross-package contract owned by iapeer's pty
+// supervisor — its path/format is the seam; any change is coordinated with iapeer.
 function paneLogPath(target: PeerRecord): string {
   return join(iapeerRoot(), 'logs', 'lifecycle', `${target.runtime}-${target.personality}.log`)
 }
@@ -1450,7 +1440,7 @@ function paneLogPath(target: PeerRecord): string {
 // the peer is actively working (spinner/elapsed-timer repaint keeps it fresh,
 // including through thinking pauses); a large/growing age = the turn has ended and
 // the prompt is quiescent. null if the log is missing/unreadable — callers treat
-// that as idle, mirroring the old peerPaneBody returning null on a dead pane.
+// that as idle (a missing log = no live peer output to stream).
 function paneLogAgeMs(target: PeerRecord): number | null {
   try {
     return Date.now() - statSync(paneLogPath(target)).mtimeMs
