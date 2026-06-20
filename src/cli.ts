@@ -101,27 +101,26 @@ type TelegramInterface = {
   activity?: boolean
 }
 
-// `natural` is the post-vocab-flip contract word for human peers; legacy `human`
-// is kept for not-yet-flipped registries. BOTH must round-trip verbatim through
-// readPeerProfile/writePeerProfile — before `natural` joined this union the typed
-// reader silently coerced it to the runtime default (`human` for telegram), so
-// every `interface bot/human` verb run CLOBBERED the foundation-provisioned
-// `intelligence: natural` (the exact pilot-notifier lesson selfConfig.ts guards
-// against: preserve, don't re-derive identity). Found live 2026-06-10 during
-// connect-flow acceptance.
-type Intelligence = 'natural' | 'human' | 'artificial' | 'scripted'
+// IAP identity-contract vocabulary: natural (human peers) / artificial (LLM agents)
+// / absent (programmatic sources — no LLM, no human). The foundation normalizes any
+// legacy value (human→natural, scripted→absent) at its boundary BEFORE an envelope
+// or a provisioned profile reaches this runtime, so only the current vocabulary is
+// accepted here — byte-identical to notifier-runtime's envelope set. Values still
+// round-trip verbatim through readPeerProfile/writePeerProfile (preserve, never
+// re-derive identity — the pilot-notifier lesson selfConfig.ts guards).
+type Intelligence = 'natural' | 'artificial' | 'absent'
 
 const HUMAN_RUNTIMES_TR = new Set(['telegram', 'discord', 'matrix', 'email', 'web'])
 const SCRIPTED_RUNTIMES_TR = new Set(['webhook', 'api', 'cron'])
 
 function defaultIntelligenceForRuntime(runtime: string): Intelligence {
-  if (HUMAN_RUNTIMES_TR.has(runtime)) return 'human'
-  if (SCRIPTED_RUNTIMES_TR.has(runtime)) return 'scripted'
+  if (HUMAN_RUNTIMES_TR.has(runtime)) return 'natural'
+  if (SCRIPTED_RUNTIMES_TR.has(runtime)) return 'absent'
   return 'artificial'
 }
 
 function isIntelligence(value: unknown): value is Intelligence {
-  return value === 'natural' || value === 'human' || value === 'artificial' || value === 'scripted'
+  return value === 'natural' || value === 'artificial' || value === 'absent'
 }
 
 type PeerProfile = {
@@ -321,26 +320,39 @@ function readJsonFile<T>(path: string): T | null {
 }
 
 function readPeerProfile(cwd = process.cwd()): PeerProfile | null {
-  const raw = readJsonFile<Partial<PeerProfile>>(peerProfilePath(cwd))
+  const raw = readJsonFile<Partial<PeerProfile> & { default_runtime?: string }>(peerProfilePath(cwd))
   if (!raw) return null
   if (typeof raw.personality !== 'string') {
     throw new TelegramRuntimeError(`${peerProfilePath(cwd)} personality is required`)
   }
-  if (typeof raw.runtime !== 'string') {
-    throw new TelegramRuntimeError(`${peerProfilePath(cwd)} runtime is required`)
+  // Effective runtime: prefer the current `default_runtime`; fall back to the legacy
+  // `runtime` mirror the foundation is retiring. Only the absence of BOTH is an error —
+  // we no longer REQUIRE the legacy field (that throw is what blocked the mirror's
+  // removal). The internal PeerProfile.runtime is populated from this resolved value, so
+  // every downstream consumer (paneLogPath, transcript select, lifecycle) is unchanged.
+  const effectiveRuntime =
+    typeof raw.default_runtime === 'string' && raw.default_runtime
+      ? raw.default_runtime
+      : typeof raw.runtime === 'string'
+        ? raw.runtime
+        : undefined
+  if (!effectiveRuntime) {
+    throw new TelegramRuntimeError(
+      `${peerProfilePath(cwd)} default_runtime (or legacy runtime) is required`,
+    )
   }
   const personality = normalizeName(raw.personality)
   assertName(personality, 'personality')
   const runtimes = Array.isArray(raw.runtimes)
     ? raw.runtimes.filter((item): item is string => typeof item === 'string')
-    : [raw.runtime]
+    : [effectiveRuntime]
   const intelligence: Intelligence = isIntelligence(raw.intelligence)
     ? raw.intelligence
-    : defaultIntelligenceForRuntime(raw.runtime)
+    : defaultIntelligenceForRuntime(effectiveRuntime)
   return {
     personality,
-    runtime: raw.runtime,
-    runtimes: unique([raw.runtime, ...runtimes]),
+    runtime: effectiveRuntime,
+    runtimes: unique([effectiveRuntime, ...runtimes]),
     description: typeof raw.description === 'string' ? raw.description : '',
     intelligence,
     // expansion и interfaces round-trip'ятся verbatim (sanitize в точке
@@ -495,7 +507,16 @@ function setTelegramInterface(profile: PeerProfile, patch: TelegramInterface): P
 }
 
 function readPeersIndex(): PeersIndex {
-  return readJsonFile<PeersIndex>(peersIndexPath()) ?? { version: 1, peers: [] }
+  const index = readJsonFile<PeersIndex>(peersIndexPath()) ?? { version: 1, peers: [] }
+  // Resolve each registry peer's effective runtime: prefer `default_runtime`, fall back
+  // to the legacy `runtime` mirror. Keeps PeerRecord.runtime populated even for a peer
+  // that never hydrates (missing cwd/local profile) once the foundation drops the mirror.
+  const peers = (Array.isArray(index.peers) ? index.peers : []).map(peer => {
+    const dr = (peer as { default_runtime?: unknown }).default_runtime
+    const runtime = typeof dr === 'string' && dr ? dr : peer.runtime
+    return runtime === peer.runtime ? peer : { ...peer, runtime }
+  })
+  return { ...index, peers }
 }
 
 function hydratePeerRecord(peer: PeerRecord): PeerRecord {
@@ -2683,14 +2704,10 @@ async function handleInboundMessage(args: {
   // from the stream (already the delivered message; the 0.8.1 race) while
   // agent→agent sends stay visible (v0.8.2). Built from the directory read above.
   const operatorTargets = new Set(
-    // Operators are HUMAN peers. Post foundation-vocab-flip they carry `natural`;
-    // legacy `human` is kept for back-compat (a not-yet-flipped / read-compat registry).
-    // String() keeps this robust to the runtime's legacy `Intelligence` union type.
+    // Operators are HUMAN peers — intelligence `natural` (the foundation normalizes
+    // any legacy value at its boundary, so only the current vocabulary arrives here).
     directory.peers
-      .filter(p => {
-        const intel = String(p.intelligence)
-        return intel === 'natural' || intel === 'human'
-      })
+      .filter(p => p.intelligence === 'natural')
       .map(p => p.personality),
   )
   const isOperator = (personality: string): boolean => operatorTargets.has(personality)
