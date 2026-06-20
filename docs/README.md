@@ -16,17 +16,17 @@ telegram-runtime is a bridge between Telegram and a team of [iapeer](https://git
    └──────────────────────────────────────────────────────────┘
 ```
 
-It's a `*-runtime` package of the iapeer ecosystem: a presence runtime for human peers, alongside the Claude and Codex agent runtimes. Agents get no Telegram tools — the channel is transparent to them, they just message a peer by name.
+It's an iapeer runtime: the human counterpart to the Claude and Codex agent runtimes. Agents get no Telegram tools — the channel is transparent to them, they just message a peer by name.
 
 ## What it does
 
 - **Two-way exchange** — a person's message reaches the recipient peer; the peer's replies go to its Telegram chat.
-- **Voice** — a voice message from the person is transcribed to text and delivered to the agent; the agent can reply with a voice file.
+- **Voice both ways** — voice in is transcribed to text (with a local fallback); voice out is delivered as a Telegram voice message.
 - **Typing indicator** — while the agent works on a reply, the chat shows a typing indicator.
-- **Activity stream** — optionally the owner sees what the agent is doing right now (which tools it's using).
+- **Activity stream** — an optional stream showing which tools the agent is using right now.
 - **Attachments** — files and images travel both ways.
-- **Control commands** — `/stop`, `/new`, `/compact`, and alias shortcuts straight from the chat.
-- **Multiple bots** — each agent can have its own bot; the bridge polls them all in one process.
+- **Control from the chat** — `/stop`, `/new`, `/compact`, and alias shortcuts, run through iapeer and never delivered to the agent as text.
+- **Multiple bots, one process** — each agent has its own bot; the bridge polls them all in a single process.
 
 ## Quick start
 

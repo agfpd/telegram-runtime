@@ -7,9 +7,9 @@
 [![license](https://img.shields.io/npm/l/@agfpd/telegram-runtime)](./LICENSE)
 [![platform](https://img.shields.io/badge/platform-macOS-lightgrey)](#quick-start)
 
-telegram-runtime lets a person live inside an [iapeer](https://github.com/agfpd/iapeer) agent team through Telegram: the owner messages an agent from the messenger and gets replies in the same chat. To the agent, the person is an ordinary peer it messages with `send_to_peer` — the bridge turns that into a Telegram message in the right chat, and turns the person's reply back into an ordinary inbound message. It carries voice, attachments, a typing indicator, an activity stream, and control commands.
+telegram-runtime gives a person presence in an [iapeer](https://github.com/agfpd/iapeer) agent team through Telegram: the owner messages an agent from the messenger and gets replies in the same chat. To the agent, the person is an ordinary peer it messages with `send_to_peer` — the bridge turns that into a Telegram message in the right chat, and turns the person's reply back into an ordinary inbound message. It carries voice, attachments, a typing indicator, an activity stream, and control commands.
 
-> **Built for iapeer.** It isn't a standalone bot framework — it runs only inside [iapeer](https://github.com/agfpd/iapeer), alongside `iapeer-memory` and `notifier-runtime`. It's a presence runtime, the human counterpart to the Claude and Codex agent runtimes, that iapeer provisions and launches and whose messages travel over iapeer's own routing.
+> **Built for iapeer.** It isn't a standalone bot framework — it runs only inside [iapeer](https://github.com/agfpd/iapeer), alongside `iapeer-memory` and `notifier-runtime`. It's an iapeer runtime, the human counterpart to the Claude and Codex agent runtimes, that iapeer provisions and launches and whose messages travel over iapeer's own routing.
 
 ## How it works
 
