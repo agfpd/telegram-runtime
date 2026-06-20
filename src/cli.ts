@@ -450,6 +450,14 @@ function writePeerProfile(cwd: string, profile: PeerProfile): void {
     ...existing,
     ...profile,
   }
+  // Canonical runtime field is `default_runtime` — the foundation retired the legacy
+  // `runtime` mirror (registry-side in iapeer 0.4.10). `...profile` carries the resolved
+  // runtime; persist it as default_runtime and DROP the mirror so a local mutation
+  // (interface/activity) never re-introduces the field readPeerProfile no longer
+  // requires. The resolved value equals the existing default_runtime (it was read from
+  // it), so identity round-trips unchanged — this only stops re-seeding the mirror.
+  merged.default_runtime = profile.runtime
+  delete merged.runtime
   writeJsonAtomic(path, merged)
 }
 
