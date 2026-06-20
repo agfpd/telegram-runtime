@@ -26,6 +26,7 @@ import { runSelfConfig } from './selfConfig.ts'
 // modules import them too). Imported here rather than re-declared so a grammar
 // change (e.g. NAME_RE) is made ONCE, not in two places.
 import { IAPEER_DIR, NAME_RE, PEER_PROFILE_FILE, RUNTIME } from './constants.ts'
+import { writeJsonAtomic } from './fsAtomic.ts'
 
 const MAX_TELEGRAM_TEXT = 4096
 // Outbound send hardening: a hung Telegram API call (transient network /
@@ -326,13 +327,6 @@ function readJsonFile<T>(path: string): T | null {
       `${path} is invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
     )
   }
-}
-
-function writeJsonAtomic(path: string, value: unknown, mode = 0o600): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode })
-  renameSync(tmp, path)
 }
 
 function readPeerProfile(cwd = process.cwd()): PeerProfile | null {

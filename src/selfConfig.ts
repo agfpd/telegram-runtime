@@ -27,9 +27,10 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
-import { basename, dirname, join } from 'path'
+import { basename, join } from 'path'
 import { IAPEER_DIR, NAME_RE, PEER_PROFILE_FILE, RUNTIME } from './constants.ts'
 import { resolveIapeerRoot } from './manifest.ts'
+import { writeJsonAtomic } from './fsAtomic.ts'
 
 export interface SelfConfigOptions {
   env?: NodeJS.ProcessEnv
@@ -79,13 +80,6 @@ function readRawProfile(path: string): Record<string, unknown> {
     // malformed → start clean (nothing valid to preserve)
   }
   return {}
-}
-
-function writeJsonAtomic(path: string, value: unknown, mode = 0o600): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode })
-  renameSync(tmp, path)
 }
 
 /** Write a bot credential .env under the IAPEER_ROOT-aware bots registry — the SAME
