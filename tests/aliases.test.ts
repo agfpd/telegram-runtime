@@ -45,7 +45,7 @@ describe('expandAlias — operator slash-command expansion (§3.5 IAPeer DECISIO
   })
 })
 
-describe('resolveAliases — canonical expansion.aliases with transition fallback', () => {
+describe('resolveAliases — canonical expansion.aliases', () => {
   const base = {
     personality: 'demo',
     runtime: 'claude',
@@ -72,22 +72,26 @@ describe('resolveAliases — canonical expansion.aliases with transition fallbac
     expect(resolveAliases(profile)).toEqual({ '/alias-new': 'expanded new' })
   })
 
-  test('falls back to interfaces.telegram.aliases (pre-relocation profile)', () => {
+  test('interfaces.telegram.aliases is NOT read anymore (removed transition fallback)', () => {
+    // The telegram-bound location was a transition home; the fleet migrated to
+    // expansion.aliases and the fallback was co-verified empty fleet-wide
+    // (2026-06-20) before removal. A profile that somehow still carries it — even
+    // with no expansion.aliases — gets undefined, not a legacy read.
     const profile = {
       ...base,
       interfaces: { telegram: { aliases: { '/alias-new': 'tg new' } } },
-    }
-    expect(resolveAliases(profile)).toEqual({ '/alias-new': 'tg new' })
+    } as Parameters<typeof resolveAliases>[0]
+    expect(resolveAliases(profile)).toBeUndefined()
   })
 
-  test('canonical wins ALONE over the fallback — no merge', () => {
+  test('expansion.aliases is read; a stray interfaces.telegram.aliases is ignored', () => {
     const profile = {
       ...base,
       expansion: { aliases: { '/alias-new': 'canonical new' } },
       interfaces: {
         telegram: { aliases: { '/alias-new': 'tg new', '/alias-compact': 'tg compact' } },
       },
-    }
+    } as Parameters<typeof resolveAliases>[0]
     expect(resolveAliases(profile)).toEqual({ '/alias-new': 'canonical new' })
   })
 
@@ -116,29 +120,13 @@ describe('resolveAliases — canonical expansion.aliases with transition fallbac
     expect(resolveAliases(profile)).toEqual({ '/alias-new': 'ok' })
   })
 
-  test('sanitizes fallback map too', () => {
-    const profile = {
-      ...base,
-      interfaces: {
-        telegram: {
-          aliases: {
-            '/alias-new': 'ok',
-            'no-slash': 'dropped',
-            '/alias-empty': '',
-          } as Record<string, string>,
-        },
-      },
-    }
-    expect(resolveAliases(profile)).toEqual({ '/alias-new': 'ok' })
-  })
-
-  test('empty-after-sanitize canonical map falls back to interfaces.telegram', () => {
+  test('empty-after-sanitize canonical map returns undefined (no fallback)', () => {
     const profile = {
       ...base,
       expansion: { aliases: { 'no-slash': 'dropped' } as Record<string, string> },
       interfaces: { telegram: { aliases: { '/alias-new': 'tg new' } } },
-    }
-    expect(resolveAliases(profile)).toEqual({ '/alias-new': 'tg new' })
+    } as Parameters<typeof resolveAliases>[0]
+    expect(resolveAliases(profile)).toBeUndefined()
   })
 
   test('unknown expansion siblings do not break alias resolution', () => {

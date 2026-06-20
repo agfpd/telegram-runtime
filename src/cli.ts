@@ -99,15 +99,6 @@ type TelegramInterface = {
   // peer streams out of the box). TELEGRAM_ACTIVITY_DEFAULT=0 is the env
   // opt-out for hosts where the stream is noise.
   activity?: boolean
-  // Operator slash-command aliases (§3.5) — TRANSITION FALLBACK ONLY. The
-  // canonical location moved to top-level `PeerProfile.expansion.aliases`
-  // (private runtime-plugin config, design sync with iapeer 2026-06-11);
-  // aliases here were misfiled in the passport section. Read as a fallback
-  // until iapeer's fleet-wide data migration lands, then this field (and the
-  // fallback in resolveAliases()) can be dropped. Alias keys live in the
-  // `/alias_*` namespace (underscore — Telegram registered commands forbid `-`);
-  // bare slash keys (`/new`, `/compact`) are reserved for the control layer.
-  aliases?: Record<string, string>
 }
 
 // `natural` is the post-vocab-flip contract word for human peers; legacy `human`
@@ -402,21 +393,16 @@ export function expandAlias(text: string, aliases: Record<string, string> | unde
 /**
  * Resolve the effective alias map for a peer profile.
  *
- * Canonical source is the top-level `expansion.aliases` section — private
- * runtime-plugin config, named for the mechanism so future runtimes (discord/
- * matrix) read the same map (design sync with iapeer 2026-06-11, topic
- * aliases-section-design). When present and non-empty after sanitizing, it
- * wins ALONE — no merge with the fallback, so a migrated profile is read
- * exactly as migrated.
+ * Source is the top-level `expansion.aliases` section — private runtime-plugin
+ * config, named for the mechanism so future runtimes (discord/matrix) read the
+ * same map (design sync with iapeer 2026-06-11, topic aliases-section-design).
+ * Two earlier transition homes — `interfaces.telegram.aliases` (telegram-bound,
+ * 2026-06-07 contract split) and the original top-level `aliases` — were retired
+ * by the fleet-wide migration to `expansion.aliases`; both read-fallbacks were
+ * dropped once zero profiles carried them (interfaces.telegram.aliases
+ * co-verified empty fleet-wide 2026-06-20).
  *
- * `interfaces.telegram.aliases` (the previous canonical location, 2026-06-07
- * contract split) is the TRANSITION fallback until iapeer's fleet-wide data
- * migration relocates all profiles; drop it (and TelegramInterface.aliases)
- * after migration + soak. The original top-level `aliases` fallback was
- * removed in this release: verified per-profile 2026-06-11 that zero registry
- * profiles still carry it (9 bot peers + index all migrated).
- *
- * Both sections round-trip verbatim through readPeerProfile (unknown-field
+ * The section round-trips verbatim through readPeerProfile (unknown-field
  * preservation), so sanitizing happens here at the point of use, not at parse.
  */
 export function resolveAliases(profile: PeerProfile | null): Record<string, string> | undefined {
@@ -425,11 +411,6 @@ export function resolveAliases(profile: PeerProfile | null): Record<string, stri
   if (canonical && typeof canonical === 'object' && !Array.isArray(canonical)) {
     const sanitized = sanitizeAliases(canonical as Record<string, unknown>)
     if (sanitized) return sanitized
-  }
-  const telegram = profile.interfaces?.telegram
-  const fallback = telegram && typeof telegram === 'object' ? telegram.aliases : undefined
-  if (fallback && typeof fallback === 'object' && !Array.isArray(fallback)) {
-    return sanitizeAliases(fallback as Record<string, unknown>)
   }
   return undefined
 }
@@ -667,7 +648,6 @@ function listBotKeys(): string[] {
 function runtimeFetch(url: string, init?: RequestInit): Promise<Response> {
   const proxy =
     process.env.TELEGRAM_RUNTIME_PROXY ??
-    process.env.CLAUDE_TG_PROXY ??
     process.env.HTTPS_PROXY ??
     process.env.HTTP_PROXY ??
     ''
@@ -2662,9 +2642,8 @@ async function handleInboundMessage(args: {
   // and substitute the text if it matches an alias key.
   //
   // Reads the profile fresh on every inbound message so operator edits to
-  // the alias map take effect without restarting telegram-runtime. Canonical
-  // location is the top-level expansion.aliases section with a transition
-  // fallback to interfaces.telegram.aliases — see resolveAliases().
+  // the alias map take effect without restarting telegram-runtime. The alias
+  // source is the top-level expansion.aliases section — see resolveAliases().
   const baseText = voiceTranscript !== null ? `🎤 [voice] ${voiceTranscript}` : args.text
   let deliveredText = baseText
   try {
@@ -3520,7 +3499,6 @@ async function main(): Promise<void> {
   }
   switch (cmd) {
     case 'self-install':
-    case 'install':
       await selfInstallCommand()
       return
     case 'self-config':

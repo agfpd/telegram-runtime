@@ -42,7 +42,7 @@ All three are on by default; set the variable to `0` to turn one off:
 If Telegram's API needs a proxy, the bridge honors the first of these that is set:
 
 ```
-TELEGRAM_RUNTIME_PROXY  →  CLAUDE_TG_PROXY  →  HTTPS_PROXY  →  HTTP_PROXY
+TELEGRAM_RUNTIME_PROXY  →  HTTPS_PROXY  →  HTTP_PROXY
 ```
 
 ## Fine-tuning
