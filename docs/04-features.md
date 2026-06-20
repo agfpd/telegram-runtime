@@ -26,7 +26,11 @@ You can manage the agent's session straight from Telegram:
 - **`/new`** — restart the agent with a fresh session;
 - **`/compact`** — compact the conversation context.
 
-The bridge intercepts these commands and executes them through iapeer, without delivering them to the agent as text.
+The bridge intercepts these commands and executes them through iapeer, without delivering them to the agent as text. They're also published as the bot's **command menu** in Telegram (the `/` list), so they're discoverable without memorizing them — the menu is re-synced when the agent's profile changes, no restart needed.
+
+## Runtime switch
+
+An agent can be declared on more than one runtime (Claude and Codex). When it is, the bridge offers a switch straight from the chat: `/claude` or `/codex` moves that agent onto the named runtime for its next turns. The option appears only when the agent actually declares two or more runtimes — otherwise there's nothing to switch to.
 
 ## Alias shortcuts
 

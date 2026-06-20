@@ -19,7 +19,7 @@ The bridge takes that message and sends it through the right Telegram bot into t
 The bridge keeps no separate "who's bound to whom" database — every binding is derived from peer profiles (their passports):
 
 - a **person** carries their Telegram identifier in their profile (`interfaces.telegram.user_id`) — so the bridge knows which account to message;
-- an **agent** carries a bot binding (`interfaces.telegram.bot`) — which bot is used to talk to it.
+- an **agent** carries a bot binding (`interfaces.telegram.bot_username`) — the bot's `@username`, which bot is used to talk to it.
 
 So there's one source of truth: the peer profiles; the bridge only reads them and builds the route. Connecting a bot to an agent writes these fields — no separate sync needed.
 

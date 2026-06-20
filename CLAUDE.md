@@ -113,8 +113,15 @@ fleet.
   chunked MarkdownV2→plain path. Kill switch: `TELEGRAM_RICH=0`. grammy has
   no 10.1 typings yet — the call rides `bot.api.raw` (name-keyed Proxy);
   when grammy ships them, drop the cast in `sendRichResilient`.
-- After the soak: remove the transitional `interfaces.telegram.aliases`
-  fallback + `TelegramInterface.aliases` in a dedicated release.
+- bot_username cutover (v0.20.0): `interfaces.telegram.bot_username` (@username) is
+  the natural bot key — names the credential dir `bots/<username>/`, the profile
+  field, and inbound/outbound routing (`peerBotKey`). Replaced the retired `bot`
+  (== personality dup). `migrateBotKeys()` runs idempotently at `run()` startup
+  (rename dirs + rewrite local profiles, zero-gap) and as `migrate-bot-keys
+  [--dry-run|--json]`. TRANSITIONAL DEBT — after the soak, remove in a dedicated
+  release: the `bot` read-fallback in `peerBotKey`, the NAME_RE arm in
+  `listBotKeys`, and the whole `migrateBotKeys` block (same lifecycle the
+  `interfaces.telegram.aliases` fallback followed, removed in 0.19.2).
 
 ## Плагины Claude Code / MCP — факты (кратко)
 - Плагин ставить только `--scope project`. Запись `enabledPlugins:true` в settings.json ≠ установка — без `claude plugin install --scope project` plugin-MCP не поднимается при старте.
