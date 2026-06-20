@@ -10,9 +10,17 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-06-21
+
+### Fixed
+- Outbound GIF attachments are sent with `sendAnimation` instead of `sendPhoto`.
+  Telegram's photo path runs image processing that rejects GIFs
+  (`IMAGE_PROCESS_FAILED`), which silently dropped every GIF; they now deliver and
+  play inline.
+
 ### Changed
 - Documentation actualized for the `bot_username` binding model — `docs/` (EN + RU)
-  and the dev notes. Ships into the next functional release.
+  and the dev notes.
 
 ## [0.20.0] - 2026-06-20
 
@@ -94,7 +102,8 @@ predates the public repository.
 
 - Initial public release.
 
-[Unreleased]: https://github.com/agfpd/telegram-runtime/compare/bd2d0d9...HEAD
+[Unreleased]: https://github.com/agfpd/telegram-runtime/compare/298ec51...HEAD
+[0.20.1]: https://github.com/agfpd/telegram-runtime/compare/bd2d0d9...298ec51
 [0.20.0]: https://github.com/agfpd/telegram-runtime/compare/d101caf...bd2d0d9
 [0.19.4]: https://github.com/agfpd/telegram-runtime/compare/c0381e3...d101caf
 [0.19.3]: https://github.com/agfpd/telegram-runtime/compare/1d72471...c0381e3
