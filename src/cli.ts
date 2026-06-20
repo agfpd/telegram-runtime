@@ -70,13 +70,19 @@ const MAX_RICH_TEXT = 32768
 // one env (TELEGRAM_RICH_SPACER=0), one call site, one function.
 const RICH_SPACER_ENABLED = process.env.TELEGRAM_RICH_SPACER !== '0'
 const RICH_SPACER_LINE = '&nbsp;'
-const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
+const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
+// `.gif` is NOT a photo: Telegram's sendPhoto runs server-side image processing that
+// rejects GIFs (`Bad Request: IMAGE_PROCESS_FAILED`), so a GIF attachment was silently
+// dropped. A GIF's native method is sendAnimation — it accepts the GIF container and
+// renders an inline, looping, muted player (Telegram transcodes GIF→MP4 itself).
+const ANIMATION_EXTS = new Set(['.gif'])
 // Outbound attachment → Telegram Bot API method, keyed on the file extension the
 // sending agent chose. We trust the extension as the declared format rather than
 // probing bytes/ffprobe: it keeps the outbound path dependency-free and synchronous,
 // and `sendVoice` in particular *requires* an OGG/OPUS container — the same thing the
 // `.ogg`/`.oga` extension declares. Voice → inline waveform player; audio → music
-// track; photo → image; everything else falls back to a plain document (no regression).
+// track; animation → inline GIF player; photo → image; everything else falls back to a
+// plain document (no regression).
 const VOICE_EXTS = new Set(['.ogg', '.oga'])
 const AUDIO_EXTS = new Set(['.mp3', '.m4a', '.wav', '.aac', '.flac'])
 
@@ -1039,11 +1045,12 @@ async function downloadTelegramFile(args: {
 // multipart field name it expects. Pure + exported so the routing is unit-testable
 // without touching the network.
 export function selectSendMethod(ext: string): {
-  method: 'sendVoice' | 'sendAudio' | 'sendPhoto' | 'sendDocument'
-  field: 'voice' | 'audio' | 'photo' | 'document'
+  method: 'sendVoice' | 'sendAudio' | 'sendAnimation' | 'sendPhoto' | 'sendDocument'
+  field: 'voice' | 'audio' | 'animation' | 'photo' | 'document'
 } {
   if (VOICE_EXTS.has(ext)) return { method: 'sendVoice', field: 'voice' }
   if (AUDIO_EXTS.has(ext)) return { method: 'sendAudio', field: 'audio' }
+  if (ANIMATION_EXTS.has(ext)) return { method: 'sendAnimation', field: 'animation' }
   if (PHOTO_EXTS.has(ext)) return { method: 'sendPhoto', field: 'photo' }
   return { method: 'sendDocument', field: 'document' }
 }

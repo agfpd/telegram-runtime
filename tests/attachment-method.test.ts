@@ -13,8 +13,12 @@ describe('selectSendMethod — outbound attachment routing by extension', () => 
     }
   })
 
-  test('images stay sendPhoto (no regression)', () => {
-    for (const ext of ['.jpg', '.jpeg', '.png', '.gif', '.webp']) {
+  test('.gif → sendAnimation (NOT sendPhoto — Telegram rejects GIF-as-photo)', () => {
+    expect(selectSendMethod('.gif')).toEqual({ method: 'sendAnimation', field: 'animation' })
+  })
+
+  test('static images stay sendPhoto (no regression)', () => {
+    for (const ext of ['.jpg', '.jpeg', '.png', '.webp']) {
       expect(selectSendMethod(ext)).toEqual({ method: 'sendPhoto', field: 'photo' })
     }
   })
