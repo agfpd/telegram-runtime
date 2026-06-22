@@ -10,6 +10,17 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-06-22
+
+### Fixed
+- The Telegram `/<runtime>` switch command (e.g. `/codex`) now makes the target runtime the
+  peer's PERMANENT default, not just a one-shot restart. It previously ran `iapeer new <peer>
+  <rt>` alone — starting the peer on `<rt>` once but leaving `default_runtime` unchanged, so the
+  next idle-reap/wake reverted to the old default. It now persists first via `iapeer
+  default-runtime <rt> --peer <peer>` (atomic local-profile write + registry reindex), and
+  aborts the restart if the persist fails (so the peer never comes up on a runtime it will
+  silently revert from).
+
 ## [0.20.2] - 2026-06-22
 
 ### Fixed
