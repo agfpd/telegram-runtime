@@ -2550,23 +2550,28 @@ export async function handleLifecycleCommand(
   await bot.api.sendMessage(chatId, feedback).catch(() => {})
 }
 
-// Hard runtime switch (control): `iapeer new <peer> <toRuntime>` — mechanically restart
-// the peer ON the target runtime. Same shape as handleLifecycleCommand('new') but with
-// an EXPLICIT target runtime instead of the peer's current one (iapeer's `new` honours
-// the passed runtime: `rt = runtime ?? peer.runtime`, refusing undeclared/foreign). We
-// pre-check the peer DECLARES the runtime so the operator gets clean per-peer feedback
-// rather than iapeer's refusal text. Any failure is surfaced and swallowed — control
-// must never throw into the delivery path.
+// PERMANENT runtime switch (Telegram /<runtime>): make <toRuntime> the peer's DEFAULT (so it
+// survives idle-reap/wake) AND restart the peer onto it now. Two ordered iapeer verbs:
+//   1. `default-runtime <rt> --peer <p>` — PERSISTS: writes the local peer-profile `runtime`
+//      (the source of truth) THEN reindexes the registry projection — atomic, no-clobber,
+//      idempotent (contract confirmed with iapeer 2026-06-22; don't hand-write the profile —
+//      a local- or registry-only edit desyncs against reindexFromLocals).
+//   2. `new <p> <rt>` — one-shot restart onto it (stays generic; persistence is verb #1's job).
+// Persist FIRST and ABORT the restart on its failure: restarting without a persisted default
+// would bring the peer up on <rt> once and silently revert to the old default on the next wake
+// (exactly the bug this fixes — /<rt> used to be `new` alone). Pre-check the peer DECLARES the
+// runtime for clean feedback. Any failure is surfaced and swallowed — control must never throw
+// into the delivery path.
 export async function handleRuntimeSwitchCommand(
   bot: Bot,
   chatId: string,
   target: PeerRecord,
   toRuntime: string,
 ): Promise<void> {
-  // "already on" must mean the LIVE runtime, not default_runtime: for a peer running a
-  // non-default runtime (codex while default=claude) the old `target.runtime` guard would
-  // falsely short-circuit a real switch (same default_runtime≠live class as liveRuntime).
-  if (liveRuntime(target) === toRuntime) {
+  // No-op ONLY when <toRuntime> is already BOTH the default (target.runtime = default_runtime)
+  // AND the live runtime. A peer live-on-X but default-still-Y still needs the persist, so the
+  // live check alone is insufficient for the permanent-switch semantic.
+  if (target.runtime === toRuntime && liveRuntime(target) === toRuntime) {
     await bot.api.sendMessage(chatId, `already on ${toRuntime}`).catch(() => {})
     return
   }
@@ -2579,6 +2584,38 @@ export async function handleRuntimeSwitchCommand(
   }
   const bin = resolveIapeerBin()
   await bot.api.sendMessage(chatId, `switching to ${toRuntime}...`).catch(() => {})
+
+  // 1. Persist the default (skip when already the default — the verb is idempotent, but avoid
+  //    a needless reindex). On any failure, abort BEFORE restarting (see header).
+  if (target.runtime !== toRuntime) {
+    const persist = await runControlBinary(
+      bin,
+      ['default-runtime', toRuntime, '--peer', target.personality],
+      LIFECYCLE_TIMEOUT_MS.new,
+    )
+    logActivity('runtime-switch', {
+      peer: target.personality,
+      from: target.runtime,
+      to: toRuntime,
+      phase: 'persist-default',
+      status: persist.status,
+      timedOut: persist.timedOut,
+      error: persist.error?.message,
+    })
+    if (persist.error || persist.timedOut || persist.status !== 0) {
+      const why = persist.error?.message
+        ? persist.error.message
+        : persist.timedOut
+          ? 'timed out'
+          : persist.stderr.trim() || persist.stdout.trim() || `exit ${persist.status}`
+      await bot.api
+        .sendMessage(chatId, `switch to ${toRuntime} aborted — could not set default runtime: ${why}`)
+        .catch(() => {})
+      return
+    }
+  }
+
+  // 2. Restart onto the (now-default) runtime.
   const result = await runControlBinary(bin, ['new', target.personality, toRuntime], LIFECYCLE_TIMEOUT_MS.new)
   const stdout = result.stdout.trim()
   const stderr = result.stderr.trim()
@@ -2586,21 +2623,22 @@ export async function handleRuntimeSwitchCommand(
     peer: target.personality,
     from: target.runtime,
     to: toRuntime,
+    phase: 'restart',
     status: result.status,
     timedOut: result.timedOut,
     error: result.error?.message,
   })
   let feedback: string
   if (result.error) {
-    feedback = `switch failed: ${result.error.message}`
+    feedback = `default set to ${toRuntime}, but restart failed: ${result.error.message}`
   } else if (result.timedOut) {
-    feedback = `switch to ${toRuntime} timed out after ${Math.round(LIFECYCLE_TIMEOUT_MS.new / 1000)}s — check the session`
+    feedback = `default set to ${toRuntime}; restart timed out after ${Math.round(LIFECYCLE_TIMEOUT_MS.new / 1000)}s — check the session`
   } else if (result.status === 0) {
-    feedback = `switched to ${toRuntime} — fresh session up`
+    feedback = `switched to ${toRuntime} (now default) — fresh session up`
   } else if (/offline/i.test(stderr) || /offline/i.test(stdout)) {
-    feedback = 'not in an active session'
+    feedback = `default set to ${toRuntime}; not in an active session`
   } else {
-    feedback = `switch to ${toRuntime} failed: ${stderr || stdout || `exit ${result.status}`}`
+    feedback = `default set to ${toRuntime}, but restart failed: ${stderr || stdout || `exit ${result.status}`}`
   }
   await bot.api.sendMessage(chatId, feedback).catch(() => {})
 }
