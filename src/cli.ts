@@ -1499,8 +1499,50 @@ function checkpointActivity(personality: string): void {
 // output signal → instant turn-end → activity-loop stops). Keyed by identity. Honours
 // IAPEER_ROOT (sandbox/test). LOAD-BEARING cross-package contract owned by iapeer's pty
 // supervisor — its path/format is the seam; any change is coordinated with iapeer.
+// Pure: pick the runtime whose pane-log is freshest (largest mtime). Candidates whose
+// pane-log is absent (mtimeMs === null) are skipped; if none exist, fall back. This is
+// the selection at the heart of liveRuntime() — isolated for testing.
+export function freshestRuntime(
+  candidates: { runtime: string; mtimeMs: number | null }[],
+  fallback: string,
+): string {
+  let best: { runtime: string; mtimeMs: number } | null = null
+  for (const c of candidates) {
+    if (c.mtimeMs === null) continue
+    if (!best || c.mtimeMs > best.mtimeMs) best = { runtime: c.runtime, mtimeMs: c.mtimeMs }
+  }
+  return best?.runtime ?? fallback
+}
+
+// The peer's CURRENTLY-ACTIVE runtime — NOT profile.default_runtime, which is only the
+// wake DEFAULT, never the live truth. The iapeer pty-supervisor writes ONLY the live
+// runtime's pane-log `<rt>-<personality>.log`; during a turn that file is, by definition,
+// the freshest (repainted ~1Hz by the spinner/elapsed timer). So the live runtime = the
+// candidate (peer.runtimes) whose pane-log exists and is freshest. Authoritative source
+// confirmed with iapeer 2026-06-22: the alive pty-host session (foundation
+// listHostedPeers) IS the truth, and this resolves the very file that session writes.
+// Without this, a peer running a NON-default runtime (e.g. codex while
+// default_runtime=claude) keyed EVERY consumer — typing's pane-log mtime + the transcript
+// path + the line parser — to the wrong, absent/stale claude artifacts, so BOTH the
+// typing and the tool-use/activity indicators silently died. Falls back to the declared
+// default when no pane-log exists yet (a never-run peer, for which no indicator fires).
+export function liveRuntime(target: PeerRecord): string {
+  const candidates = (target.runtimes?.length ? target.runtimes : [target.runtime]).map(
+    runtime => {
+      let mtimeMs: number | null = null
+      try {
+        mtimeMs = statSync(
+          join(iapeerRoot(), 'logs', 'lifecycle', `${runtime}-${target.personality}.log`),
+        ).mtimeMs
+      } catch {}
+      return { runtime, mtimeMs }
+    },
+  )
+  return freshestRuntime(candidates, target.runtime)
+}
+
 function paneLogPath(target: PeerRecord): string {
-  return join(iapeerRoot(), 'logs', 'lifecycle', `${target.runtime}-${target.personality}.log`)
+  return join(iapeerRoot(), 'logs', 'lifecycle', `${liveRuntime(target)}-${target.personality}.log`)
 }
 
 // Milliseconds since the peer's pane-log last advanced (= since its last byte of
@@ -1979,9 +2021,11 @@ function codexTranscriptPath(cwd: string): string | null {
   return null
 }
 
-function activeTranscriptPath(target: PeerRecord): string | null {
+// rt defaults to the LIVE runtime (not target.runtime/default_runtime); createTranscriptReader
+// resolves it once and threads it so the path branch and the line parser cannot diverge.
+export function activeTranscriptPath(target: PeerRecord, rt: string = liveRuntime(target)): string | null {
   if (!target.cwd) return null
-  if (target.runtime === 'codex') return codexTranscriptPath(target.cwd)
+  if (rt === 'codex') return codexTranscriptPath(target.cwd)
   // claude (and any future runtime writing Claude-style JSONL projects)
   return claudeTranscriptPath(target.cwd)
 }
@@ -1999,10 +2043,11 @@ function createTranscriptReader(
   target: PeerRecord,
   isOperator?: (personality: string) => boolean,
 ): TranscriptReader | null {
-  const path = activeTranscriptPath(target)
+  const rt = liveRuntime(target)
+  const path = activeTranscriptPath(target, rt)
   if (!path) return null
-  const parse = target.runtime === 'codex' ? codexLineEvents : claudeLineEvents
-  const tokensOf = target.runtime === 'codex' ? codexContextTokens : claudeContextTokens
+  const parse = rt === 'codex' ? codexLineEvents : claudeLineEvents
+  const tokensOf = rt === 'codex' ? codexContextTokens : claudeContextTokens
   let offset = 0
   let lastTokens: number | null = null
   try {
@@ -2076,7 +2121,7 @@ async function watchPeerTurn(
 
   const reader = activityOn ? createTranscriptReader(target, isOperator) : null
   if (activityOn && !reader) {
-    logActivity('reader.none', { peer: target.personality, runtime: target.runtime, cwd: target.cwd })
+    logActivity('reader.none', { peer: target.personality, runtime: liveRuntime(target), cwd: target.cwd })
   }
   // Splash verb shown at the top. Picked now so it appears the instant the turn
   // starts (before any tool_use — like the typing indicator), and re-picked on
@@ -2518,7 +2563,10 @@ export async function handleRuntimeSwitchCommand(
   target: PeerRecord,
   toRuntime: string,
 ): Promise<void> {
-  if (target.runtime === toRuntime) {
+  // "already on" must mean the LIVE runtime, not default_runtime: for a peer running a
+  // non-default runtime (codex while default=claude) the old `target.runtime` guard would
+  // falsely short-circuit a real switch (same default_runtime≠live class as liveRuntime).
+  if (liveRuntime(target) === toRuntime) {
     await bot.api.sendMessage(chatId, `already on ${toRuntime}`).catch(() => {})
     return
   }

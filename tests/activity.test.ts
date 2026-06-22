@@ -13,6 +13,7 @@ import {
   pickSplash,
   claudeProjectDirName,
   parseActivityCommand,
+  freshestRuntime,
 } from '../src/cli.ts'
 
 describe('shortToolName — MCP prefix stripped to the bare gesture', () => {
@@ -365,6 +366,31 @@ describe('claudeProjectDirName — cwd → ~/.claude/projects dir', () => {
     expect(claudeProjectDirName('/Users/macmini/.mergemind-dreamer')).toBe(
       '-Users-macmini--mergemind-dreamer',
     )
+  })
+})
+
+describe('freshestRuntime — the peer’s LIVE runtime = its freshest pane-log', () => {
+  test('codex live, claude pane-log absent → codex (the linus case: default_runtime=claude, running codex)', () => {
+    expect(
+      freshestRuntime([{ runtime: 'claude', mtimeMs: null }, { runtime: 'codex', mtimeMs: 1000 }], 'claude'),
+    ).toBe('codex')
+  })
+  test('both pane-logs exist → the freshest (active turn repaints the live one ~1Hz)', () => {
+    expect(
+      freshestRuntime([{ runtime: 'claude', mtimeMs: 500 }, { runtime: 'codex', mtimeMs: 900 }], 'claude'),
+    ).toBe('codex')
+    expect(
+      freshestRuntime([{ runtime: 'claude', mtimeMs: 900 }, { runtime: 'codex', mtimeMs: 500 }], 'claude'),
+    ).toBe('claude')
+  })
+  test('no pane-log exists yet (never-run peer) → fall back to the declared default', () => {
+    expect(
+      freshestRuntime([{ runtime: 'claude', mtimeMs: null }, { runtime: 'codex', mtimeMs: null }], 'claude'),
+    ).toBe('claude')
+    expect(freshestRuntime([], 'codex')).toBe('codex')
+  })
+  test('single candidate present → it', () => {
+    expect(freshestRuntime([{ runtime: 'codex', mtimeMs: 42 }], 'claude')).toBe('codex')
   })
 })
 
