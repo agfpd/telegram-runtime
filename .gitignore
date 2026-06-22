@@ -10,3 +10,10 @@ node_modules/
 
 # Internals docs — not part of the public release
 docs/internals/
+
+# Session dev-instruction — read from cwd by Claude (CLAUDE.md) and Codex
+# (AGENTS.md → symlink to CLAUDE.md); internal working doc, not a public artifact.
+# Root-anchored so only the repo-root files are ignored. Untracked via
+# `git rm --cached` — they stay on disk for cwd-reads.
+/CLAUDE.md
+/AGENTS.md
