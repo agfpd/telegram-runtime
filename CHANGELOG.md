@@ -10,6 +10,19 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-06-22
+
+### Fixed
+- Typing and tool-use/activity indicators now work for a peer running a NON-default
+  runtime (e.g. codex while its `default_runtime` is claude). The runtime was resolved
+  from the profile's `default_runtime` rather than the *live* runtime, so the typing
+  busy-gate (pane-log mtime) and the transcript path/parser keyed to absent/stale claude
+  artifacts and both indicators silently died. `liveRuntime()` now resolves the active
+  runtime from the freshest `<runtime>-<personality>.log` pane-log — the file the iapeer
+  supervisor writes only for the live runtime — falling back to the declared default when
+  no pane-log exists (a never-run peer). The same fix corrects the runtime-switch
+  "already on" guard, which compared against `default_runtime`.
+
 ## [0.20.1] - 2026-06-21
 
 ### Fixed
