@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { iapDeliveryFailureVerdict, runIapSendCommand } from '../src/cli.ts'
+import { iapDeliveryFailureVerdict, parseIapSendWoke, runIapSendCommand } from '../src/cli.ts'
 
 const tmp = mkdtempSync(join(tmpdir(), 'telegram-inbound-delivery-'))
 const argvFile = join(tmp, 'argv.txt')
@@ -117,6 +117,27 @@ describe('Telegram → IAP delivery verdicts', () => {
         'not delivered: delivery timed out after 1s — check the session',
       )
     }
+  })
+})
+
+describe('parseIapSendWoke — observability of the live-injection path', () => {
+  test('extracts woke=false from the JSON result line (the at-risk live path)', () => {
+    const stdout =
+      '{"ok":true,"delivered_to":{"personality":"boris","runtime":"claude"},"woke":false,"ts":"2026-06-23T09:12:18.114Z"}\n'
+    expect(parseIapSendWoke(stdout)).toBe(false)
+  })
+
+  test('extracts woke=true from the JSON result line (a fresh wake)', () => {
+    expect(parseIapSendWoke('{"ok":true,"woke":true}')).toBe(true)
+  })
+
+  test('extracts woke from the logfmt result shape', () => {
+    expect(parseIapSendWoke('ok=true via=claude-boris woke=false ms=358')).toBe(false)
+  })
+
+  test('returns undefined when stdout carries no parseable result', () => {
+    expect(parseIapSendWoke('delivered to linus (codex)')).toBeUndefined()
+    expect(parseIapSendWoke('')).toBeUndefined()
   })
 })
 

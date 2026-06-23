@@ -1259,6 +1259,32 @@ function parseIapSendNotOk(stdout: string, stderr: string): string | null {
   return null
 }
 
+// Parse the `woke` flag from a SUCCESSFUL `iapeer send` (the result line
+// `{"ok":true,...,"woke":<bool>}`, or the logfmt `ok=true woke=<bool>` shape).
+// woke=false is the LIVE-session pty-injection path — iapeer pastes the envelope
+// into the already-running session and confirms landing by an mtime-advance
+// proxy that an ALREADY-ACTIVE target turn can satisfy falsely (the false-OK
+// behind the 2026-06-23 silent-loss incident: a paste dropped at a turn boundary
+// while the target's own turn kept the pane-log/transcript advancing). The bridge
+// cannot re-verify delivery, but logging `woke` makes that at-risk path auditable.
+// Returns undefined when stdout carries no parseable result.
+export function parseIapSendWoke(stdout: string): boolean | undefined {
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    if (line.startsWith('{') && line.endsWith('}')) {
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>
+        if (typeof obj.woke === 'boolean') return obj.woke
+      } catch {}
+    }
+    const lf = parseLogfmtValue(line, 'woke')
+    if (lf === 'true') return true
+    if (lf === 'false') return false
+  }
+  return undefined
+}
+
 function formatTimeoutSeconds(ms: number): number {
   return Math.max(1, Math.ceil(ms / 1000))
 }
@@ -1416,6 +1442,24 @@ function logOutbound(event: string, fields: Record<string, unknown> = {}): void 
     if (v !== undefined) payload[k] = v
   }
   process.stderr.write(`telegram-runtime outbound ${JSON.stringify(payload)}\n`)
+}
+
+// Structured observability for the INBOUND (Telegram → IAP) path — the mirror of
+// logOutbound that was MISSING. Before this, the inbound delivery path emitted
+// nothing on success and only an unstructured stderr line on failure, so a lost
+// inbound message left NO trace in telegram-<peer>.log (the exact "found no
+// inbound records" symptom of the 2026-06-23 incident). Every inbound delivery
+// now logs its attempt and outcome (incl. `woke`: the live-injection path that
+// can be silently lost downstream). Disable with TELEGRAM_INBOUND_LOG=0.
+const INBOUND_LOG_ENABLED = process.env.TELEGRAM_INBOUND_LOG !== '0'
+
+function logInbound(event: string, fields: Record<string, unknown> = {}): void {
+  if (!INBOUND_LOG_ENABLED) return
+  const payload: Record<string, unknown> = { ts: new Date().toISOString(), evt: event }
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== undefined) payload[k] = v
+  }
+  process.stderr.write(`telegram-runtime inbound ${JSON.stringify(payload)}\n`)
 }
 
 // Classify an outbound send failure so the log distinguishes the failure modes
@@ -2840,9 +2884,27 @@ async function handleInboundMessage(args: {
   // tick). Best-effort and a no-op when the menu is unchanged.
   void syncBotCommands(args.ctx, args.botKey, args.bot)
 
+  const inboundLen = deliveredText.length
+  const inboundAtt = attachments.length
+  logInbound('inbound.start', {
+    peer: target.personality,
+    botKey: args.botKey,
+    len: inboundLen,
+    att: inboundAtt,
+  })
   enqueueIapSend(async () => {
+    const startedAt = Date.now()
     const result = await runIapSend(args.ctx, target.personality, deliveredText, attachments)
+    const ms = Date.now() - startedAt
     if (!result.ok) {
+      logInbound('inbound.fail', {
+        peer: target.personality,
+        detail: cleanIapSendDetail(result.detail),
+        timedOut: result.timedOut ?? false,
+        ms,
+        len: inboundLen,
+        att: inboundAtt,
+      })
       const verdict = iapDeliveryFailureVerdict(result)
       process.stderr.write(`telegram-runtime: inbound delivery failed: ${result.detail}\n`)
       await args.bot.api.sendMessage(args.ctx.ownerUserId, verdict).catch(err => {
@@ -2850,7 +2912,19 @@ async function handleInboundMessage(args: {
           `telegram-runtime: inbound delivery verdict failed: ${formatError(err)}\n`,
         )
       })
+      return
     }
+    // ok=true from `iapeer send` is NOT a landing guarantee on the woke=false
+    // (live-injection) path — see parseIapSendWoke. Record `woke` so a delivery
+    // that iapeer confirmed only by an mtime-advance proxy (the false-OK class)
+    // is at least visible in the log for after-the-fact correlation.
+    logInbound('inbound.ok', {
+      peer: target.personality,
+      woke: parseIapSendWoke(result.stdout),
+      ms,
+      len: inboundLen,
+      att: inboundAtt,
+    })
   })
 
   // Surface the peer's work while it processes this turn. Fire-and-forget: one
