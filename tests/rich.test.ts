@@ -100,7 +100,7 @@ describe('sendRichResilient — transient failures retry, then yield to legacy',
   )
 })
 
-import { spaceRichParagraphs } from '../src/cli.ts'
+import { hardenSoftBreaks, spaceRichParagraphs } from '../src/cli.ts'
 
 describe('spaceRichParagraphs — paragraph spacer workaround', () => {
   test('plain + plain → spacer paragraph inserted', () => {
@@ -133,5 +133,62 @@ describe('spaceRichParagraphs — paragraph spacer workaround', () => {
 
   test('single paragraph / single newlines untouched', () => {
     expect(spaceRichParagraphs('строка раз\nстрока два')).toBe('строка раз\nстрока два')
+  })
+})
+
+describe('hardenSoftBreaks — single \\n inside a paragraph becomes a GFM hard break', () => {
+  test('the reported repro: three plain lines split by single \\n → each line hardened', () => {
+    // GFM space-joins these into "строка-А строка-Б строка-В"; the hard break (two
+    // trailing spaces) keeps them on separate lines. Last line has no successor.
+    expect(hardenSoftBreaks('строка-А\nстрока-Б\nстрока-В')).toBe('строка-А  \nстрока-Б  \nстрока-В')
+  })
+
+  test('two plain lines → first hardened, second (no successor) untouched', () => {
+    expect(hardenSoftBreaks('строка раз\nстрока два')).toBe('строка раз  \nстрока два')
+  })
+
+  test('ad-hoc bullets via • (not a GFM list marker) are plain → hardened line-by-line', () => {
+    expect(hardenSoftBreaks('• раз\n• два\n• три')).toBe('• раз  \n• два  \n• три')
+  })
+
+  test('\\n\\n paragraph breaks are left alone (next line is blank, not plain)', () => {
+    expect(hardenSoftBreaks('абзац1\n\nабзац2')).toBe('абзац1\n\nабзац2')
+  })
+
+  test('a real GFM list (- markers) is structural → NOT hardened (renders itself)', () => {
+    expect(hardenSoftBreaks('- раз\n- два\n- три')).toBe('- раз\n- два\n- три')
+  })
+
+  test('table / heading / quote / divider rows are structural → untouched', () => {
+    const md = '# Заголовок\nтекст\n| a | b |\n|---|---|\n| 1 | 2 |\n> цитата\n---'
+    // Plain "текст" precedes a table row (structural) → "текст" NOT hardened;
+    // every structural row is left intact so table/quote/divider parsing survives.
+    expect(hardenSoftBreaks(md)).toBe(md)
+  })
+
+  test('lines inside a code fence pass through verbatim (single \\n is code, not prose)', () => {
+    const md = '```js\nconst a = 1\nconst b = 2\n```'
+    expect(hardenSoftBreaks(md)).toBe(md)
+  })
+
+  test('plain prose around a fenced block: prose hardened, fence body verbatim', () => {
+    expect(hardenSoftBreaks('строка А\nстрока Б\n```\nкод1\nкод2\n```')).toBe(
+      'строка А  \nстрока Б\n```\nкод1\nкод2\n```',
+    )
+  })
+
+  test('composes after spaceRichParagraphs: paragraph spacer survives, inner \\n hardened', () => {
+    // строка-А/строка-Б share a paragraph (single \n); абзац2 is a separate one.
+    const spaced = spaceRichParagraphs('строка-А\nстрока-Б\n\nабзац2')
+    expect(hardenSoftBreaks(spaced)).toBe('строка-А  \nстрока-Б\n\n&nbsp;\n\nабзац2')
+  })
+
+  test('a line already ending in a space still gets a >=2-space hard break', () => {
+    expect(hardenSoftBreaks('раз \nдва')).toBe('раз   \nдва')
+  })
+
+  test('empty / single-line input is a no-op', () => {
+    expect(hardenSoftBreaks('')).toBe('')
+    expect(hardenSoftBreaks('одна строка')).toBe('одна строка')
   })
 })

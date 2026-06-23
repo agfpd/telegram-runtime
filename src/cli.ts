@@ -70,6 +70,20 @@ const MAX_RICH_TEXT = 32768
 // one env (TELEGRAM_RICH_SPACER=0), one call site, one function.
 const RICH_SPACER_ENABLED = process.env.TELEGRAM_RICH_SPACER !== '0'
 const RICH_SPACER_LINE = '&nbsp;'
+// Soft-break hardening (defect 2026-06-23): the rich path hands the agent's text
+// to Telegram's server-side GFM parser, which treats a single \n inside a
+// paragraph as a CommonMark SOFT break — it space-joins the two lines. So an
+// agent's natural multi-line plain text (bullets via •, ad-hoc lists, line-by-line
+// notes) collapses into one run-on line; only a blank line (\n\n) survives as a
+// break. The owner's bar: plain newlines must "just work" without the agent
+// padding with double newlines. The bridge hardens each in-paragraph soft break
+// into a GFM HARD break (two trailing spaces before the newline) so the line is
+// preserved — see hardenSoftBreaks. The legacy MarkdownV2 fallback path renders
+// \n literally and needs no such fix; this is rich-path-only. Cheap to remove
+// under a future client/server change: one env (TELEGRAM_RICH_HARDBREAK=0), one
+// call site, one function.
+const RICH_HARDBREAK_ENABLED = process.env.TELEGRAM_RICH_HARDBREAK !== '0'
+const RICH_HARDBREAK_MARK = '  '
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
 // `.gif` is NOT a photo: Telegram's sendPhoto runs server-side image processing that
 // rejects GIFs (`Bad Request: IMAGE_PROCESS_FAILED`), so a GIF attachment was silently
@@ -3188,6 +3202,43 @@ export function spaceRichParagraphs(text: string): string {
   return out.join('\n')
 }
 
+// Harden in-paragraph SOFT breaks into GFM HARD breaks so the rich path renders
+// the agent's single \n line-by-line instead of space-joining it (see
+// RICH_HARDBREAK_ENABLED). Mirrors spaceRichParagraphs' guards so the two stay
+// in lockstep:
+//   - fence-aware: lines inside ``` / ~~~ are code, passed through verbatim;
+//   - only a PLAIN line followed by another PLAIN line is hardened. Structural
+//     GFM (headings, tables, lists, quotes, dividers, fences, footnote defs,
+//     HTML) already renders line-by-line via its own block semantics, and a
+//     trailing hard-break marker can corrupt a table/list row — so it is left
+//     untouched (isPlainParagraphLine is the shared predicate);
+//   - \n\n paragraph breaks are left alone (the next line is blank, not plain),
+//     so this composes cleanly after the spacer.
+// The marker is two trailing spaces (RICH_HARDBREAK_MARK), not a trailing
+// backslash: it is purely additive whitespace and cannot collide with line
+// content that ends in '\' (which would escape to a literal backslash) nor break
+// a setext heading underline. Appending unconditionally yields >=2 trailing
+// spaces even when the line already ends in space, so the hard break always
+// takes. Exported for tests.
+export function hardenSoftBreaks(text: string): string {
+  const lines = text.split('\n')
+  let inFence = false
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
+    const next = lines[i + 1]
+    if (next === undefined) continue
+    if (isPlainParagraphLine(line) && isPlainParagraphLine(next)) {
+      lines[i] = line + RICH_HARDBREAK_MARK
+    }
+  }
+  return lines.join('\n')
+}
+
 // Try to deliver the WHOLE envelope text as one Bot API 10.1 rich message
 // (`rich_message.markdown` — Telegram parses the agent's GFM server-side).
 // Returns true when delivered; false hands the envelope to the legacy chunked
@@ -3378,10 +3429,15 @@ async function sendOutboundToTelegram(ctx: RuntimeContext, envelope: IapEnvelope
   // Rich-first: one structured message via Bot API 10.1 when enabled and the
   // text fits the rich limit; ANY rich failure falls through to the legacy
   // chunked MarkdownV2→plain path, so an envelope is never lost to the rollout.
-  // Spacer applied on the rich path only (the legacy chunked path renders via
-  // MarkdownV2 where \n\n already shows air); gate on the SPACED length so the
-  // text that actually goes out is what was measured.
-  const richText = RICH_SPACER_ENABLED ? spaceRichParagraphs(envelope.message) : envelope.message
+  // Spacer + soft-break hardening applied on the rich path only (the legacy
+  // chunked path renders via MarkdownV2 where \n\n already shows air and a single
+  // \n already breaks the line); gate on the FINAL transformed length so the text
+  // that actually goes out is what was measured. Spacer first (it works on the
+  // agent's original \n\n paragraph structure), then harden the single \n inside
+  // paragraphs into hard breaks — the spacer's &nbsp; lines sit between blanks and
+  // are left untouched by the harden pass.
+  const spacedText = RICH_SPACER_ENABLED ? spaceRichParagraphs(envelope.message) : envelope.message
+  const richText = RICH_HARDBREAK_ENABLED ? hardenSoftBreaks(spacedText) : spacedText
   const tryRich = RICH_OUTBOUND_ENABLED && richText.length <= MAX_RICH_TEXT
   // Newline fingerprint (counts only — zero content leak): GFM renders a blank
   // line (\n\n) as a paragraph break but space-joins a single \n (soft break),
