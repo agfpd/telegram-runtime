@@ -10,6 +10,20 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.20.4] - 2026-06-23
+
+### Added
+- Structured observability for the INBOUND (Telegram → IAP) path — the mirror of the existing
+  outbound log that was missing. Every inbound delivery now emits one-line JSON events
+  (`inbound.start`, `inbound.ok`, `inbound.fail`) to the runtime log, including `woke` (parsed
+  from the `iapeer send` result), `ms`, `len` and `att`. Before this, the inbound path logged
+  nothing on success and only an unstructured stderr line on failure, so a lost inbound message
+  left no trace in `telegram-<peer>.log` — the "no inbound records" symptom of the 2026-06-23
+  silent-loss incident. Logging `woke=false` makes the live-injection path (the one that can be
+  lost downstream by iapeer's mtime-proxy landed-confirm) auditable from the bridge side. The
+  bridge still cannot re-verify delivery — reliability of the live-injection path is iapeer's
+  layer — but the loss is no longer invisible. Disable with `TELEGRAM_INBOUND_LOG=0`.
+
 ## [0.20.3] - 2026-06-22
 
 ### Fixed
