@@ -43,3 +43,11 @@ Files and images travel both ways. Inbound from the person (photos, documents, a
 ## Text formatting
 
 The agent's replies arrive formatted — headings, lists, code, links render as they should in Telegram. The agent writes plain markdown; the bridge converts it to what Telegram displays correctly, splitting long messages into parts when needed.
+
+## Human approval
+
+A peer can run in `gated` mode (iapeer's `approval-mode`): instead of acting autonomously, its blocking approval requests — a dangerous command, a file edit, a plan — are routed to a human before they run. The bridge is the Telegram face of the daemon's approval broker.
+
+Each pending request arrives as a **card** showing the exact action content (the full command, the diff, the plan text) with **Allow** and **Deny** buttons. Only the owner can resolve it. A tap posts the decision back to the broker: Allow lets the tool proceed, Deny blocks it with a reason delivered to the model. The card is then edited in place to show the outcome — and because the broker is one shared queue, a resolution from any channel (the button, `iapeer approve` on the CLI, the tray) resolves the request everywhere.
+
+A **faced** peer (one with its own bot) gets its card in its own dialog with the owner. **Faceless** peers (Implementers, infra — no bot of their own) share one approval bot, provisioned with `onboard-approval`; if the owner declines it, their approvals surface only on the host bar and CLI. The whole feature is inert unless the daemon advertises the approval broker; a peer left in the default `yolo` mode behaves exactly as before.

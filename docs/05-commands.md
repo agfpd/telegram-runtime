@@ -16,6 +16,18 @@ Commands are `telegram-runtime <command>`. Most bindings are easier to set throu
 | `prepare [--user-id <id>]` | Initialize the peer profile in the current directory, optionally setting the Telegram account at once. |
 | `doctor [--json]` | Chain check: profile, person's account, bot configuration and bindings, no bots without an agent. |
 
+## Human approval
+
+When a peer runs in `gated` mode (iapeer's `approval-mode`), its blocking approval requests are routed to a human through the daemon's approval broker. The bridge is the Telegram face of that broker: it renders each pending request as a card with **Allow / Deny** buttons and a tap resolves it. See [04 — Features](04-features.md#human-approval).
+
+| Command | What it does |
+|---|---|
+| `approvals [--json]` | Face-side read of the daemon's pending approval queue (agrees with `iapeer approvals`). Read-only. |
+| `onboard-approval` | Show the offer for the shared approval bot (the single Telegram channel for **faceless** peers — those without their own bot). |
+| `onboard-approval --token <token>` | Provision the approval bot from a `@BotFather` token: stores the credential with `role=approval`; faceless peers' cards are delivered there once the bridge restarts. |
+| `onboard-approval --decline` / `--decline --yes` | Decline the approval bot. The two touches are a double warning: without it, faceless peers' approvals reach only the host bar (`iapeer approvals`) and CLI, never Telegram. Faced peers are unaffected. |
+| `onboard-approval --status` | Whether the approval bot is provisioned, declined, or unset. |
+
 ## System
 
 These are invoked by iapeer and launchd, not by the operator directly:
