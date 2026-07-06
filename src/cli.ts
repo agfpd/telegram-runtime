@@ -21,6 +21,13 @@ import { basename, dirname, extname, join } from 'path'
 import { spawn, spawnSync } from 'child_process'
 import { selfInstall } from './selfInstall.ts'
 import { runSelfConfig } from './selfConfig.ts'
+import {
+  fleetAvailable,
+  listApprovals,
+  probeApprovals,
+  resolveFleetBase,
+  routerJsonPath,
+} from './approvalFleet.ts'
 // NAME_RE / RUNTIME / IAPEER_DIR / PEER_PROFILE_FILE are the shared ecosystem
 // contract values — single source of truth in constants.ts (the sibling contract
 // modules import them too). Imported here rather than re-declared so a grammar
@@ -228,7 +235,8 @@ function usage(): string {
   telegram-runtime bot list [--json]
   telegram-runtime migrate-bot-keys [--dry-run] [--json]
   telegram-runtime run
-  telegram-runtime doctor [--json]`
+  telegram-runtime doctor [--json]
+  telegram-runtime approvals [--json]   # face-side read of the daemon approval queue`
 }
 
 function setFlag(flags: Flags, key: string, value: string | boolean): void {
@@ -3933,6 +3941,45 @@ async function selfConfigCommand(): Promise<void> {
   )
 }
 
+// `telegram-runtime approvals [--json]`: a FACE-side read of the daemon's human-approval
+// queue (docs/17) — the U1 proof that our fleet client agrees with `iapeer approvals`. It
+// feature-detects the daemon (router.json `fleet:1` + a live 200 from the approval
+// endpoint) and lists the pending requests the Telegram card path (U3) will render. Read
+// only: no card, no resolve — that arrives with the approval face (U2/U3).
+async function approvalsCommand(args: string[]): Promise<void> {
+  const { flags } = parseFlags(args)
+  const asJson = Boolean(flags.json)
+  if (!fleetAvailable()) {
+    const msg = `no fleet API advertised in ${routerJsonPath()} (pre-approval daemon or daemon down)`
+    if (asJson) printJson({ fleet: false, base: null, approvals: [], note: msg })
+    else process.stdout.write(`${msg}\n`)
+    return
+  }
+  const base = resolveFleetBase()
+  if (!(await probeApprovals(base))) {
+    const msg = `fleet advertised but GET ${base}/fleet/v1/approvals did not return 200`
+    if (asJson) printJson({ fleet: true, base, reachable: false, approvals: [], note: msg })
+    else process.stdout.write(`${msg}\n`)
+    return
+  }
+  const approvals = await listApprovals(base)
+  if (asJson) {
+    printJson({ fleet: true, base, reachable: true, approvals })
+    return
+  }
+  if (approvals.length === 0) {
+    process.stdout.write(`no pending approvals (${base})\n`)
+    return
+  }
+  for (const a of approvals) {
+    const ageS = Math.max(0, Math.round((a.expiresMs - a.createdMs) / 1000))
+    process.stdout.write(
+      `${a.id}  ${a.personality} · ${a.runtime} · ${a.kind} · ${a.tool}  (ttl ${ageS}s)\n` +
+        `    ${a.summary}\n`,
+    )
+  }
+}
+
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2)
   if (cmd === '--help' || cmd === '-h') {
@@ -3969,6 +4016,9 @@ async function main(): Promise<void> {
       return
     case 'doctor':
       await doctorCommand(rest)
+      return
+    case 'approvals':
+      await approvalsCommand(rest)
       return
     default:
       throw new TelegramRuntimeError(usage())
