@@ -4214,7 +4214,10 @@ async function onboardApprovalCommand(args: string[]): Promise<void> {
 
   const token = stringFlag(flags, 'token')
   if (token) {
-    ensureScaffold()
+    // Global bots registry only — NOT ensureScaffold() (which also mkdirs cwd-local
+    // .iapeer dirs). onboard-approval writes to the IAPEER_ROOT-based bots registry and
+    // must be cwd-clean so `npx … onboard-approval` from any directory leaves no junk.
+    mkdirSync(botsRoot(), { recursive: true, mode: 0o700 })
     const probe = await probeBotIdentity(token)
     const usernameFlag = stringFlag(flags, 'username')
     let botKey: string
@@ -4252,7 +4255,7 @@ async function onboardApprovalCommand(args: string[]): Promise<void> {
 
   if (flags.decline) {
     if (flags.yes) {
-      ensureScaffold()
+      mkdirSync(globalTelegramRoot(), { recursive: true, mode: 0o700 }) // global-only (cwd-clean)
       writeFileSync(approvalDeclineMarkerPath(), `${new Date().toISOString()}\n`, { mode: 0o644 })
       out('⚠️  ПРЕДУПРЕЖДЕНИЕ 2/2 — отказ зафиксирован.')
       out('Faceless gated-пиры остаются БЕЗ Telegram-канала подтверждений: их запросы')
