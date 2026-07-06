@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { Bot, GrammyError, HttpError } from 'grammy'
+import { Bot, Context, GrammyError, HttpError } from 'grammy'
 import { randomUUID } from 'crypto'
 import {
   chmodSync,
@@ -25,9 +25,19 @@ import {
   fleetAvailable,
   listApprovals,
   probeApprovals,
+  resolveApproval,
   resolveFleetBase,
   routerJsonPath,
+  type PendingApproval,
 } from './approvalFleet.ts'
+import { ApprovalFace } from './approvalFace.ts'
+import {
+  buildCardText,
+  buildKeyboard,
+  buildResolvedText,
+  DENY_REASON,
+  parseCallbackData,
+} from './approvalCard.ts'
 // NAME_RE / RUNTIME / IAPEER_DIR / PEER_PROFILE_FILE are the shared ecosystem
 // contract values — single source of truth in constants.ts (the sibling contract
 // modules import them too). Imported here rather than re-declared so a grammar
@@ -216,6 +226,9 @@ type RuntimeContext = {
   iapBin: string
   bots: Map<string, Bot>
   credentials: Map<string, BotCredential>
+  /** Fleet base URL for the approval face + callback resolves (Ф3); set at run() when the
+   *  daemon advertises fleet. Undefined ⇒ approval face is off (pre-approval daemon). */
+  approvalBase?: string
 }
 
 class TelegramRuntimeError extends Error {}
@@ -3057,7 +3070,160 @@ async function syncBotCommands(ctx: RuntimeContext, botKey: string, bot: Bot): P
   }
 }
 
+// ── Human-approval Telegram face (Ф3, docs/17) ──────────────────────────────
+// telegram-runtime is a FACE on the daemon's single approval queue: the approval face
+// (approvalFace.ts) subscribes to the fleet SSE stream and renders a card per pending
+// request; a button tap posts the resolution back to the broker. All decision logic and
+// fail-safety live in the broker/hook — this layer only shows a card and relays a click.
+const APPROVAL_ENABLED = process.env.TELEGRAM_APPROVAL !== '0'
+const APPROVAL_LOG_ENABLED = process.env.TELEGRAM_APPROVAL_LOG !== '0'
+/** The single supplied approval bot's personality — faceless peers' cards route here (U4). */
+const APPROVAL_PEER = 'approval'
+
+function logApproval(event: string, fields: Record<string, unknown> = {}): void {
+  if (!APPROVAL_LOG_ENABLED) return
+  const payload: Record<string, unknown> = { ts: new Date().toISOString(), evt: `approval.${event}` }
+  for (const [k, v] of Object.entries(fields)) if (v !== undefined) payload[k] = v
+  process.stderr.write(`telegram-runtime approval ${JSON.stringify(payload)}\n`)
+}
+
+type ApprovalCardEntry = { chatId: string; botKey: string; messageId: number; item: PendingApproval }
+
+/** PURE routing decision for an approval card (docs/17 §2b, criterion #3/#4). Exported for
+ *  tests — the faced/faceless/no-route split is the crux of the routing contract:
+ *  - FACED peer (its own bot loaded) → its own bot ('faced'): the owner's single TG dialog
+ *    with that peer, which IS the "same dialog" criterion #3 asks for;
+ *  - FACELESS peer (no own bot) → the shared approval bot ('faceless', U4), if loaded;
+ *  - neither → null: no Telegram route, the bar/CLI still hold the request (not lost). */
+export function pickApprovalRoute(
+  personality: string,
+  byPersonality: Map<string, { interfaces?: { telegram?: { bot_username?: string; bot?: string } } }>,
+  hasBot: (botKey: string) => boolean,
+): { botKey: string; kind: 'faced' | 'faceless' } | null {
+  const peer = byPersonality.get(personality)
+  const ownKey = peer ? peerBotKey(peer as PeerProfile) : undefined
+  if (ownKey && hasBot(ownKey)) return { botKey: ownKey, kind: 'faced' }
+  const approvalPeer = byPersonality.get(APPROVAL_PEER)
+  const approvalKey = approvalPeer ? peerBotKey(approvalPeer as PeerProfile) : undefined
+  if (approvalKey && hasBot(approvalKey)) return { botKey: approvalKey, kind: 'faceless' }
+  return null
+}
+
+/** Bind the pure route to this runtime's live bots + owner dialog. */
+function resolveApprovalRoute(
+  ctx: RuntimeContext,
+  personality: string,
+): { bot: Bot; botKey: string; kind: 'faced' | 'faceless'; chatId: string } | null {
+  const directory = readPeerDirectory()
+  const route = pickApprovalRoute(personality, directory.byPersonality, key => ctx.bots.has(key))
+  if (!route) return null
+  return { bot: ctx.bots.get(route.botKey)!, botKey: route.botKey, kind: route.kind, chatId: ctx.ownerUserId }
+}
+
+/** Start the approval face when the daemon advertises the fleet/approval surface. Returns
+ *  the running face (for cleanup) or null (approval off / pre-approval daemon). The card
+ *  registry is closed over here — its `onResolved` edit is the SINGLE authoritative card
+ *  edit, so a resolution from ANY channel (button, CLI, tray, timeout) converges on it. */
+function startApprovalFace(ctx: RuntimeContext): ApprovalFace | null {
+  if (!APPROVAL_ENABLED) {
+    logApproval('face.off', { reason: 'TELEGRAM_APPROVAL=0' })
+    return null
+  }
+  if (!fleetAvailable()) {
+    logApproval('face.off', { reason: 'no fleet in router.json (pre-approval daemon)' })
+    return null
+  }
+  const base = resolveFleetBase()
+  ctx.approvalBase = base
+  const cards = new Map<string, ApprovalCardEntry>()
+  const face = new ApprovalFace({
+    base,
+    log: (evt, f) => logApproval(evt.replace(/^approval\./, ''), f),
+    handlers: {
+      onRequest: async item => {
+        const route = resolveApprovalRoute(ctx, item.personality)
+        if (!route) {
+          logApproval('noroute', { id: item.id, personality: item.personality })
+          return
+        }
+        try {
+          const sent = await route.bot.api.sendMessage(route.chatId, buildCardText(item), {
+            parse_mode: 'HTML',
+            reply_markup: buildKeyboard(item.id),
+          })
+          cards.set(item.id, { chatId: route.chatId, botKey: route.botKey, messageId: sent.message_id, item })
+          logApproval('card.sent', {
+            id: item.id,
+            personality: item.personality,
+            route: route.kind,
+            botKey: route.botKey,
+            messageId: sent.message_id,
+          })
+        } catch (err) {
+          logApproval('card.send.error', { id: item.id, reason: formatError(err) })
+        }
+      },
+      onResolved: async info => {
+        const entry = cards.get(info.id)
+        if (!entry) return // a card we never rendered (faceless noroute / already gone)
+        cards.delete(info.id)
+        const bot = ctx.bots.get(entry.botKey)
+        if (!bot) return
+        try {
+          await bot.api.editMessageText(entry.chatId, entry.messageId, buildResolvedText(entry.item, info), {
+            parse_mode: 'HTML',
+          })
+          logApproval('card.resolved', { id: info.id, decision: info.decision, via: info.via, by: info.by })
+        } catch (err) {
+          logApproval('card.edit.error', { id: info.id, reason: formatError(err) })
+        }
+      },
+    },
+  })
+  face.start()
+  logApproval('face.on', { base })
+  return face
+}
+
+/** Handle a tap on an approval card button. Owner-gated (only the owner may resolve — the
+ *  same fromId gate as inbound). Posts the resolution to the broker and answers the
+ *  callback; the authoritative card EDIT is left to the approval-resolved SSE event
+ *  (onResolved) so every channel converges on one rendering. */
+async function handleApprovalCallback(ctx: RuntimeContext, cbCtx: Context): Promise<void> {
+  const parsed = parseCallbackData(cbCtx.callbackQuery?.data)
+  if (!parsed) return // a button that isn't ours — ignore cleanly (shared callback channel)
+  const fromId = String(cbCtx.from?.id ?? '')
+  if (fromId !== ctx.ownerUserId) {
+    await cbCtx.answerCallbackQuery({ text: 'Не для вас' }).catch(() => {})
+    logApproval('callback.denied-nonowner', { id: parsed.id, fromId })
+    return
+  }
+  const base = ctx.approvalBase ?? resolveFleetBase()
+  const approver = ctx.owner.personality
+  const body = parsed.action === 'deny' ? { approver, reason: DENY_REASON } : { approver }
+  try {
+    const outcome = await resolveApproval(base, parsed.id, parsed.action, body)
+    await cbCtx
+      .answerCallbackQuery({
+        text:
+          outcome === 'gone'
+            ? 'Уже обработано'
+            : parsed.action === 'approve'
+              ? '✅ Разрешено'
+              : '⛔ Отклонено',
+      })
+      .catch(() => {})
+    logApproval('callback', { id: parsed.id, action: parsed.action, outcome })
+  } catch (err) {
+    await cbCtx.answerCallbackQuery({ text: 'Ошибка, повторите' }).catch(() => {})
+    logApproval('callback.error', { id: parsed.id, reason: formatError(err) })
+  }
+}
+
 function installBotHandlers(ctx: RuntimeContext, botKey: string, bot: Bot, credential: BotCredential): void {
+  bot.on('callback_query:data', async telegramCtx => {
+    await handleApprovalCallback(ctx, telegramCtx)
+  })
   bot.on('message:text', async telegramCtx => {
     await handleInboundMessage({
       ctx,
@@ -3843,8 +4009,10 @@ async function runCommand(): Promise<void> {
   const bots = new Map<string, Bot>()
   const releaseLocks: ReleaseLock[] = []
   let commandsSyncTimer: ReturnType<typeof setInterval> | undefined
+  let approvalFace: ApprovalFace | null = null
   const cleanup = () => {
     if (commandsSyncTimer) clearInterval(commandsSyncTimer)
+    approvalFace?.stop()
     for (const release of releaseLocks.splice(0).reverse()) release()
   }
   process.once('exit', cleanup)
@@ -3889,6 +4057,10 @@ async function runCommand(): Promise<void> {
     installBotHandlers(ctx, botKey, bot, credentials.get(botKey)!)
   }
   installStdinEnvelopeReader(ctx)
+  // Human-approval Telegram face (Ф3): subscribe to the daemon approval broker and render
+  // cards. No-op when the daemon is pre-approval (no fleet) or TELEGRAM_APPROVAL=0 — the
+  // runtime then behaves byte-identically to before this feature.
+  approvalFace = startApprovalFace(ctx)
   process.stderr.write(
     `telegram-runtime: running ${RUNTIME}-${owner.personality}; bots=${Array.from(bots.keys()).join(', ')}\n`,
   )
