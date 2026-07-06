@@ -202,6 +202,10 @@ type PeersIndex = {
 type BotCredential = {
   key: string
   token: string
+  /** Optional service role of this bot (Ф3): `approval` marks the single shared
+   *  approval bot — a pure telegram-runtime service-bot (no foundation peer), routed to
+   *  for FACELESS peers' approval cards. Read from TELEGRAM_BOT_ROLE in the credential. */
+  role?: string
 }
 
 type PeerDirectory = {
@@ -229,6 +233,10 @@ type RuntimeContext = {
   /** Fleet base URL for the approval face + callback resolves (Ф3); set at run() when the
    *  daemon advertises fleet. Undefined ⇒ approval face is off (pre-approval daemon). */
   approvalBase?: string
+  /** botKey of the loaded shared approval bot (credential role=approval), if provisioned.
+   *  FACELESS peers' cards route here. Undefined ⇒ owner declined / not provisioned ⇒
+   *  faceless approvals have no Telegram route (bar/CLI still hold them). */
+  approvalBotKey?: string
 }
 
 class TelegramRuntimeError extends Error {}
@@ -249,7 +257,8 @@ function usage(): string {
   telegram-runtime migrate-bot-keys [--dry-run] [--json]
   telegram-runtime run
   telegram-runtime doctor [--json]
-  telegram-runtime approvals [--json]   # face-side read of the daemon approval queue`
+  telegram-runtime approvals [--json]   # face-side read of the daemon approval queue
+  telegram-runtime onboard-approval [--token <token> | --decline [--yes] | --status]`
 }
 
 function setFlag(flags: Flags, key: string, value: string | boolean): void {
@@ -752,6 +761,7 @@ function loadCredential(botKey: string): BotCredential {
   return {
     key: botKey,
     token,
+    role: env.TELEGRAM_BOT_ROLE?.trim() || undefined,
   }
 }
 
@@ -3077,8 +3087,13 @@ async function syncBotCommands(ctx: RuntimeContext, botKey: string, bot: Bot): P
 // fail-safety live in the broker/hook — this layer only shows a card and relays a click.
 const APPROVAL_ENABLED = process.env.TELEGRAM_APPROVAL !== '0'
 const APPROVAL_LOG_ENABLED = process.env.TELEGRAM_APPROVAL_LOG !== '0'
-/** The single supplied approval bot's personality — faceless peers' cards route here (U4). */
-const APPROVAL_PEER = 'approval'
+/** Credential role value marking the shared approval bot (Ф3 U4). It is a pure
+ *  telegram-runtime service-bot — NOT a foundation peer — so faceless approval delivery
+ *  never depends on the registry / an intelligence classification (validated with iapeer
+ *  2026-07-06: the approval path is queue-driven; send_to_peer(approval) is off the
+ *  delivery critical path). Provisioned via `onboard-approval`, polled by the run-loop
+ *  like any credential, resolved to for faceless peers by pickApprovalRoute. */
+const APPROVAL_BOT_ROLE = 'approval'
 
 function logApproval(event: string, fields: Record<string, unknown> = {}): void {
   if (!APPROVAL_LOG_ENABLED) return
@@ -3093,19 +3108,20 @@ type ApprovalCardEntry = { chatId: string; botKey: string; messageId: number; it
  *  tests — the faced/faceless/no-route split is the crux of the routing contract:
  *  - FACED peer (its own bot loaded) → its own bot ('faced'): the owner's single TG dialog
  *    with that peer, which IS the "same dialog" criterion #3 asks for;
- *  - FACELESS peer (no own bot) → the shared approval bot ('faceless', U4), if loaded;
+ *  - FACELESS peer (no own bot) → the shared approval SERVICE-bot ('faceless', U4) — the
+ *    loaded credential whose role=approval, NOT a foundation peer lookup (decoupled from
+ *    the registry per the 2026-07-06 iapeer validation);
  *  - neither → null: no Telegram route, the bar/CLI still hold the request (not lost). */
 export function pickApprovalRoute(
   personality: string,
   byPersonality: Map<string, { interfaces?: { telegram?: { bot_username?: string; bot?: string } } }>,
   hasBot: (botKey: string) => boolean,
+  approvalBotKey: string | undefined,
 ): { botKey: string; kind: 'faced' | 'faceless' } | null {
   const peer = byPersonality.get(personality)
   const ownKey = peer ? peerBotKey(peer as PeerProfile) : undefined
   if (ownKey && hasBot(ownKey)) return { botKey: ownKey, kind: 'faced' }
-  const approvalPeer = byPersonality.get(APPROVAL_PEER)
-  const approvalKey = approvalPeer ? peerBotKey(approvalPeer as PeerProfile) : undefined
-  if (approvalKey && hasBot(approvalKey)) return { botKey: approvalKey, kind: 'faceless' }
+  if (approvalBotKey && hasBot(approvalBotKey)) return { botKey: approvalBotKey, kind: 'faceless' }
   return null
 }
 
@@ -3115,7 +3131,12 @@ function resolveApprovalRoute(
   personality: string,
 ): { bot: Bot; botKey: string; kind: 'faced' | 'faceless'; chatId: string } | null {
   const directory = readPeerDirectory()
-  const route = pickApprovalRoute(personality, directory.byPersonality, key => ctx.bots.has(key))
+  const route = pickApprovalRoute(
+    personality,
+    directory.byPersonality,
+    key => ctx.bots.has(key),
+    ctx.approvalBotKey,
+  )
   if (!route) return null
   return { bot: ctx.bots.get(route.botKey)!, botKey: route.botKey, kind: route.kind, chatId: ctx.ownerUserId }
 }
@@ -3181,7 +3202,7 @@ function startApprovalFace(ctx: RuntimeContext): ApprovalFace | null {
     },
   })
   face.start()
-  logApproval('face.on', { base })
+  logApproval('face.on', { base, approvalBot: ctx.approvalBotKey ?? '(none — faceless→bar/CLI)' })
   return face
 }
 
@@ -4045,6 +4066,10 @@ async function runCommand(): Promise<void> {
     bots.set(key, new Bot(credential.token, { client: { fetch: runtimeFetch as typeof fetch } }))
   }
   if (bots.size === 0) throw new TelegramRuntimeError(`${botsRoot()} has no configured bots`)
+  // The shared approval service-bot (Ф3 U4): the loaded credential marked role=approval.
+  // Faceless peers' cards route to it (pickApprovalRoute). At most one is expected; if the
+  // owner declined onboarding there is none → faceless approvals stay on the bar/CLI.
+  const approvalBotKey = [...credentials.values()].find(c => c.role === APPROVAL_BOT_ROLE)?.key
   const ctx: RuntimeContext = {
     cwd: process.cwd(),
     owner,
@@ -4052,6 +4077,7 @@ async function runCommand(): Promise<void> {
     iapBin: process.env.TELEGRAM_RUNTIME_IAP_BIN ?? process.env.IAP_BIN ?? 'iapeer',
     bots,
     credentials,
+    approvalBotKey,
   }
   for (const [botKey, bot] of bots) {
     installBotHandlers(ctx, botKey, bot, credentials.get(botKey)!)
@@ -4152,6 +4178,115 @@ async function approvalsCommand(args: string[]): Promise<void> {
   }
 }
 
+// `telegram-runtime onboard-approval …` — provision (or decline) the shared approval
+// service-bot (Ф3 U4). It is a pure telegram-runtime service-bot — a credential dir with
+// role=approval, polled by the run-loop, routed to for FACELESS peers' approval cards —
+// NOT a foundation peer (decoupled from the registry, validated with iapeer 2026-07-06).
+// The owner may decline; declining faceless Telegram delivery is a two-touch gate
+// (--decline → --decline --yes) so the double warning is seen, not click-buried.
+function approvalDeclineMarkerPath(): string {
+  return join(globalTelegramRoot(), 'approval-onboard.declined')
+}
+
+function approvalBotKeyProvisioned(): string | undefined {
+  for (const key of listBotKeys()) {
+    try {
+      if (loadCredential(key).role === APPROVAL_BOT_ROLE) return key
+    } catch {
+      /* missing token — skip */
+    }
+  }
+  return undefined
+}
+
+async function onboardApprovalCommand(args: string[]): Promise<void> {
+  const { flags } = parseFlags(args)
+  const out = (s: string): void => void process.stdout.write(`${s}\n`)
+
+  if (flags.status) {
+    const provisioned = approvalBotKeyProvisioned()
+    const declined = existsSync(approvalDeclineMarkerPath())
+    if (provisioned) out(`approval bot: provisioned (@${provisioned})`)
+    else if (declined) out('approval bot: declined (faceless approvals go to the bar/CLI only)')
+    else out('approval bot: not configured (run `telegram-runtime onboard-approval` to decide)')
+    return
+  }
+
+  const token = stringFlag(flags, 'token')
+  if (token) {
+    ensureScaffold()
+    const probe = await probeBotIdentity(token)
+    const usernameFlag = stringFlag(flags, 'username')
+    let botKey: string
+    if (probe.ok) {
+      botKey = normalizeBotUsername(probe.username)
+      if (usernameFlag && normalizeBotUsername(usernameFlag) !== botKey) {
+        throw new TelegramRuntimeError(
+          `--username "${usernameFlag}" does not match the token's bot @${probe.username} (getMe)`,
+        )
+      }
+    } else if (probe.reason === 'invalid-token') {
+      throw new TelegramRuntimeError(`onboard-approval: Telegram rejected the token (getMe: ${probe.detail})`)
+    } else if (usernameFlag) {
+      botKey = normalizeBotUsername(usernameFlag)
+      process.stderr.write(`warn: getMe unreachable (${probe.detail}); trusting --username "${botKey}"\n`)
+    } else {
+      throw new TelegramRuntimeError(
+        `onboard-approval: getMe unreachable (${probe.detail}) and no --username given to name the credential`,
+      )
+    }
+    assertBotUsername(botKey, 'approval bot-username')
+    const path = botEnvPath(botKey)
+    const env = readEnvFile(path)
+    env.TELEGRAM_BOT_TOKEN = token
+    env.TELEGRAM_BOT_USERNAME = probe.ok ? probe.username : botKey
+    env.TELEGRAM_BOT_ROLE = APPROVAL_BOT_ROLE
+    writeEnvFile(path, env)
+    rmSync(approvalDeclineMarkerPath(), { force: true })
+    out(`approval bot provisioned: @${env.TELEGRAM_BOT_USERNAME}`)
+    out(`  credential: ${path} (role=${APPROVAL_BOT_ROLE})`)
+    out('  Faceless peers’ approval cards will be delivered here.')
+    out('  Restart the runtime to start polling it (boris: `iapeer update-runtime telegram` / restart).')
+    return
+  }
+
+  if (flags.decline) {
+    if (flags.yes) {
+      ensureScaffold()
+      writeFileSync(approvalDeclineMarkerPath(), `${new Date().toISOString()}\n`, { mode: 0o644 })
+      out('⚠️  ПРЕДУПРЕЖДЕНИЕ 2/2 — отказ зафиксирован.')
+      out('Faceless gated-пиры остаются БЕЗ Telegram-канала подтверждений: их запросы')
+      out('видны только в хостовом баре (`iapeer approvals`) и CLI. Faced-пиры со своим')
+      out('ботом работают как обычно.')
+      out('Провижн позже:  telegram-runtime onboard-approval --token <TOKEN от @BotFather>')
+      return
+    }
+    out('⚠️  ПРЕДУПРЕЖДЕНИЕ 1/2 — что теряешь, отказавшись от approval-бота:')
+    out('Без него запросы подтверждения FACELESS gated-пиров (Implementer’ы, infra) НЕ')
+    out('дойдут до Telegram вообще. Они будут видны ТОЛЬКО в хостовом баре')
+    out('(`iapeer approvals`) и CLI. Вдали от хоста ты их не увидишь и не ответишь с')
+    out('телефона — пир блокируется до таймаута (default-deny) либо до ответа у хоста.')
+    out('(Faced-пиры со своим ботом НЕ затронуты — им карточка приходит в их диалог.)')
+    out('')
+    out('Подтвердить отказ:  telegram-runtime onboard-approval --decline --yes')
+    return
+  }
+
+  // Bare invocation → the offer.
+  const provisioned = approvalBotKeyProvisioned()
+  if (provisioned) {
+    out(`approval bot already provisioned: @${provisioned}. Re-run with --token to replace it.`)
+    return
+  }
+  out('Approval-бот — единый Telegram-канал для запросов подтверждения от FACELESS-пиров')
+  out('(Implementer’ы, infra — у них нет своего бота). Когда такой пир в режиме gated')
+  out('упирается в блокирующий аппрув, карточка Allow/Deny приходит СЮДА.')
+  out('')
+  out('  Провижн:  telegram-runtime onboard-approval --token <TOKEN от @BotFather>')
+  out('  Отказ:    telegram-runtime onboard-approval --decline')
+  out('  Статус:   telegram-runtime onboard-approval --status')
+}
+
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2)
   if (cmd === '--help' || cmd === '-h') {
@@ -4191,6 +4326,9 @@ async function main(): Promise<void> {
       return
     case 'approvals':
       await approvalsCommand(rest)
+      return
+    case 'onboard-approval':
+      await onboardApprovalCommand(rest)
       return
     default:
       throw new TelegramRuntimeError(usage())
