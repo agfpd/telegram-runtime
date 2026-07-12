@@ -10,6 +10,19 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-12
+
+### Removed
+- bot_username cutover transitional debt (dedicated debt-removal release; the 0.20.0 cutover
+  soaked 22 days and the fleet is verified clean — `migrate-bot-keys --dry-run --json` reported
+  zero dir renames, zero profile rewrites, zero warnings; no host profile or env file carries a
+  legacy key). Gone: the legacy `bot` read-fallback in `peerBotKey` (and the `bot` field in the
+  profile type), the NAME_RE arm in `listBotKeys` (credential dirs are matched by the
+  bot-username grammar only), the whole `migrateBotKeys` machinery with its `migrate-bot-keys`
+  CLI command and startup invocation, and self-config's legacy `TELEGRAM_BOT` env fallback plus
+  the retired-`bot`-field strip (the foundation passes `TELEGRAM_BOT_USERNAME` only).
+  `interfaces.telegram.bot_username` is now the single bot key on every path.
+
 ## [0.22.1] - 2026-07-06
 
 ### Fixed

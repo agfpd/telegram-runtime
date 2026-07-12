@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { probeBotIdentity } from '../src/cli.ts'
+import { peerBotKey, probeBotIdentity } from '../src/cli.ts'
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -7,6 +7,24 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { 'content-type': 'application/json' },
   })
 }
+
+// ── peerBotKey: resolves a peer's bot catalog key from bot_username ──────────
+describe('peerBotKey', () => {
+  const base = { personality: 'x', runtime: 'claude', runtimes: ['claude'], description: '', intelligence: 'artificial' as const }
+
+  test('resolves the bot_username key', () => {
+    expect(peerBotKey({ ...base, interfaces: { telegram: { bot_username: 'maria_bot' } } })).toBe('maria_bot')
+  })
+
+  test('normalizes @-prefix and case', () => {
+    expect(peerBotKey({ ...base, interfaces: { telegram: { bot_username: '@Maria_Bot' } } })).toBe('maria_bot')
+  })
+
+  test('undefined for a peer with no telegram bot (e.g. the human owner)', () => {
+    expect(peerBotKey({ ...base, interfaces: { telegram: { user_id: '1' } } })).toBeUndefined()
+    expect(peerBotKey(base)).toBeUndefined()
+  })
+})
 
 describe('probeBotIdentity — getMe validation for `bot add`', () => {
   test('valid token → ok with the REAL username from getMe', async () => {

@@ -125,15 +125,8 @@ type TelegramInterface = {
   // (decision 2026-06-20): it names the credential dir bots/<username>/.env (token +
   // @username) AND keys inbound/outbound routing. Globally unique in Telegram and
   // immutable (changing a bot's @username = creating a new bot), so it is a stable
-  // catalog key with no orphan-on-rename hazard. Replaces the retired `bot` field,
-  // which duplicated `personality` (bot == personality fleet-wide before the cutover).
+  // catalog key with no orphan-on-rename hazard.
   bot_username?: string
-  // RETIRED catalog key (== personality duplicate). Kept ONLY as a read-fallback for
-  // the migration window so routing degrades gracefully if a profile is read before
-  // migrateBotKeys() rewrites it; never WRITTEN anymore. Dropped in a follow-up release
-  // once the fleet carries bot_username everywhere (same lifecycle as the aliases
-  // transition fallback).
-  bot?: string
   // Agent-activity progress channel (second, separate channel — NOT
   // send_to_peer). Tri-state on purpose: `true`/`false` is an explicit
   // per-peer operator choice (set via the `/activity` chat command), `undefined`
@@ -254,7 +247,6 @@ function usage(): string {
   telegram-runtime bot add <bot-username> --token <token>
   telegram-runtime bot remove <bot-username>
   telegram-runtime bot list [--json]
-  telegram-runtime migrate-bot-keys [--dry-run] [--json]
   telegram-runtime run
   telegram-runtime doctor [--json]
   telegram-runtime approvals [--json]   # face-side read of the daemon approval queue
@@ -588,31 +580,12 @@ function setTelegramInterface(profile: PeerProfile, patch: TelegramInterface): P
 }
 
 /** Resolve a peer's bot catalog key — the value that names its credential dir and
- *  keys inbound/outbound routing. Canonical source is `bot_username` (normalized);
- *  the retired `bot` field is read only as a migration-window fallback so a profile
- *  read before migrateBotKeys() rewrites it still routes. Returns undefined for a peer
- *  with no telegram bot (e.g. the human owner). */
+ *  keys inbound/outbound routing. Source is `bot_username` (normalized). Returns
+ *  undefined for a peer with no telegram bot (e.g. the human owner). */
 export function peerBotKey(profile: PeerProfile): string | undefined {
   const telegram = telegramInterface(profile)
   if (telegram.bot_username) return normalizeBotUsername(String(telegram.bot_username))
-  if (telegram.bot) return String(telegram.bot)
   return undefined
-}
-
-/** Strip the retired `interfaces.telegram.bot` field (== personality duplicate) from a
- *  profile, leaving every other telegram field intact. No-op when absent. Used by the
- *  write paths and migrateBotKeys so a rewritten profile never re-seeds the legacy key. */
-function clearLegacyBotKey(profile: PeerProfile): PeerProfile {
-  const telegram = profile.interfaces?.telegram
-  if (!telegram || typeof telegram !== 'object' || !('bot' in telegram)) return profile
-  const { bot: _legacy, ...rest } = telegram as TelegramInterface
-  return {
-    ...profile,
-    interfaces: {
-      ...(profile.interfaces ?? {}),
-      telegram: rest,
-    },
-  }
 }
 
 function readPeersIndex(): PeersIndex {
@@ -768,13 +741,8 @@ function loadCredential(botKey: string): BotCredential {
 function listBotKeys(): string[] {
   try {
     return readdirSync(botsRoot(), { withFileTypes: true })
-      // A credential dir is keyed by the bot @username (BOT_USERNAME_RE) post-cutover.
-      // The legacy NAME_RE grammar is still accepted so a not-yet-renamed dir keeps
-      // loading during the migration window (run() calls migrateBotKeys first, so in
-      // steady state every dir matches BOT_USERNAME_RE). The two grammars are disjoint
-      // — usernames carry underscores, personalities carry hyphens — so the union never
-      // double-counts. Drop the NAME_RE arm once the fleet is fully cut over.
-      .filter(entry => entry.isDirectory() && (BOT_USERNAME_RE.test(entry.name) || NAME_RE.test(entry.name)))
+      // A credential dir is keyed by the bot @username (BOT_USERNAME_RE).
+      .filter(entry => entry.isDirectory() && BOT_USERNAME_RE.test(entry.name))
       .map(entry => entry.name)
       .sort()
   } catch {
@@ -3114,7 +3082,7 @@ type ApprovalCardEntry = { chatId: string; botKey: string; messageId: number; it
  *  - neither → null: no Telegram route, the bar/CLI still hold the request (not lost). */
 export function pickApprovalRoute(
   personality: string,
-  byPersonality: Map<string, { interfaces?: { telegram?: { bot_username?: string; bot?: string } } }>,
+  byPersonality: Map<string, { interfaces?: { telegram?: { bot_username?: string } } }>,
   hasBot: (botKey: string) => boolean,
   approvalBotKey: string | undefined,
 ): { botKey: string; kind: 'faced' | 'faceless' } | null {
@@ -3760,9 +3728,8 @@ async function interfaceCommand(args: string[]): Promise<void> {
     const profile = readPeerProfile(cwd)
     if (!profile) throw new TelegramRuntimeError(`${path} missing`)
     // The profile carries the bot @username as the natural key; it also names the
-    // credential dir bots/<username>/.env. The retired `bot` field (== personality
-    // duplicate) is stripped here so a re-link cleans up any legacy value.
-    const updated = clearLegacyBotKey(setTelegramInterface(profile, { bot_username: username }))
+    // credential dir bots/<username>/.env.
+    const updated = setTelegramInterface(profile, { bot_username: username })
     writePeerProfile(cwd, updated)
     printJson(updated)
     return
@@ -3884,138 +3851,6 @@ async function doctorCommand(args: string[]): Promise<void> {
   if (!result.ok) process.exitCode = 1
 }
 
-// ── bot_username cutover migration ──────────────────────────────────────────
-// Idempotent data migration to the bot_username key model (decision 2026-06-20):
-//   1. rename every legacy bots/<personality>/ credential dir → bots/<username>/,
-//      driven by that dir's .env TELEGRAM_BOT_USERNAME (the source of truth for the
-//      @username);
-//   2. rewrite each peer's LOCAL profile so interfaces.telegram carries `bot_username`
-//      (the username) and no longer carries the retired `bot` key.
-// Runs at run() startup BEFORE credentials load, so a plain `update-runtime` deploy
-// carries the flip inside the new binary with no separate window and no
-// old-binary-meets-new-data gap. Write-only-on-change + atomic writes + per-item
-// try/catch → safe to re-run and safe if one profile/dir is malformed. The registry
-// (peers-profiles.json) is the foundation's domain and is left untouched; routing uses
-// the LOCAL profile (hydration overrides the registry) with a bot→bot_username read
-// fallback, so a stale registry value never goes dark. Remove this whole block (and the
-// `bot` read-fallback) in a follow-up release once the fleet is fully cut over.
-type BotKeyMigrationReport = {
-  dryRun: boolean
-  dirRenames: Array<{ from: string; to: string; applied: boolean; skipped?: string }>
-  profileRewrites: Array<{ personality: string; from: string | null; to: string; applied: boolean }>
-  warnings: string[]
-}
-
-export function migrateBotKeys(opts: { dryRun?: boolean } = {}): BotKeyMigrationReport {
-  const dryRun = opts.dryRun ?? false
-  const report: BotKeyMigrationReport = { dryRun, dirRenames: [], profileRewrites: [], warnings: [] }
-
-  // Pass 1 — credential dirs. Drive the rename off each dir's .env @username and record
-  // a personality→username map so Pass 2 can resolve a legacy profile that still points
-  // at the old dir name.
-  const renameMap = new Map<string, string>() // old dir name (== personality) → @username
-  for (const dir of listBotKeys()) {
-    const env = readEnvFile(botEnvPath(dir))
-    const username = env.TELEGRAM_BOT_USERNAME ? normalizeBotUsername(env.TELEGRAM_BOT_USERNAME) : ''
-    if (!username || !BOT_USERNAME_RE.test(username)) {
-      report.warnings.push(`bot dir "${dir}" has no valid TELEGRAM_BOT_USERNAME; left as-is`)
-      renameMap.set(dir, dir)
-      continue
-    }
-    renameMap.set(dir, username)
-    if (username === dir) continue // already keyed by @username
-    if (existsSync(botDir(username))) {
-      report.dirRenames.push({ from: dir, to: username, applied: false, skipped: 'target exists' })
-      report.warnings.push(`bot dir rename ${dir} → ${username} skipped: target already exists`)
-      continue
-    }
-    if (!dryRun) {
-      try {
-        renameSync(botDir(dir), botDir(username))
-      } catch (err) {
-        report.dirRenames.push({ from: dir, to: username, applied: false, skipped: 'error' })
-        report.warnings.push(`bot dir rename ${dir} → ${username} failed: ${formatError(err)}`)
-        continue
-      }
-    }
-    report.dirRenames.push({ from: dir, to: username, applied: !dryRun })
-  }
-
-  // Pass 2 — peer profiles. Resolve each peer's @username (existing bot_username, else
-  // via the rename map / the bot dir's .env) and rewrite the LOCAL profile to the
-  // bot_username key, stripping the retired `bot`. Write only on change.
-  for (const peer of readPeersIndex().peers) {
-    if (!peer || typeof peer.personality !== 'string' || !peer.cwd) continue
-    let profile: PeerProfile | null
-    try {
-      profile = readPeerProfile(peer.cwd)
-    } catch (err) {
-      report.warnings.push(`peer "${peer.personality}" profile unreadable: ${formatError(err)}`)
-      continue
-    }
-    if (!profile) continue
-    const tg = telegramInterface(profile)
-    const legacy = typeof tg.bot === 'string' && tg.bot.length > 0 ? tg.bot : ''
-    const current = tg.bot_username ? normalizeBotUsername(String(tg.bot_username)) : ''
-    if (!legacy && !current) continue // no telegram bot (e.g. the human owner)
-
-    let target = ''
-    if (current && BOT_USERNAME_RE.test(current)) {
-      target = current
-    } else if (legacy) {
-      const mapped = renameMap.get(legacy)
-      if (mapped && BOT_USERNAME_RE.test(mapped)) {
-        target = mapped
-      } else {
-        const env = readEnvFile(botEnvPath(legacy))
-        const u = env.TELEGRAM_BOT_USERNAME ? normalizeBotUsername(env.TELEGRAM_BOT_USERNAME) : ''
-        if (u && BOT_USERNAME_RE.test(u)) target = u
-      }
-    }
-    if (!target) {
-      report.warnings.push(`peer "${peer.personality}" telegram bot key unresolved; profile left as-is`)
-      continue
-    }
-    if (current === target && !legacy) continue // already cut over
-
-    report.profileRewrites.push({ personality: peer.personality, from: current || legacy || null, to: target, applied: !dryRun })
-    if (!dryRun) {
-      try {
-        const updated = clearLegacyBotKey(setTelegramInterface(profile, { bot_username: target }))
-        writePeerProfile(peer.cwd, updated)
-      } catch (err) {
-        report.warnings.push(`peer "${peer.personality}" profile write failed: ${formatError(err)}`)
-      }
-    }
-  }
-
-  return report
-}
-
-async function migrateBotKeysCommand(args: string[]): Promise<void> {
-  const { flags } = parseFlags(args)
-  ensureScaffold()
-  const report = migrateBotKeys({ dryRun: Boolean(flags['dry-run']) })
-  if (flags.json) {
-    printJson(report)
-    if (report.warnings.length) process.exitCode = 1
-    return
-  }
-  const tag = report.dryRun ? 'would ' : ''
-  process.stdout.write(`migrate-bot-keys ${report.dryRun ? '(dry-run)' : '(applied)'}\n`)
-  for (const r of report.dirRenames) {
-    process.stdout.write(`  ${tag}rename dir ${r.from} → ${r.to}${r.skipped ? ` [skipped: ${r.skipped}]` : ''}\n`)
-  }
-  for (const r of report.profileRewrites) {
-    process.stdout.write(`  ${tag}set ${r.personality}.bot_username=${r.to}${r.from && r.from !== r.to ? ` (was ${r.from})` : ''}\n`)
-  }
-  if (!report.dirRenames.length && !report.profileRewrites.length) {
-    process.stdout.write('  nothing to migrate (already cut over)\n')
-  }
-  for (const w of report.warnings) process.stdout.write(`  ! ${w}\n`)
-  if (report.warnings.length) process.exitCode = 1
-}
-
 async function runCommand(): Promise<void> {
   ensureScaffold()
   const owner = readPeerProfile(process.cwd())
@@ -4045,20 +3880,6 @@ async function runCommand(): Promise<void> {
     cleanup()
     process.exit(143)
   })
-  // Idempotent bot_username cutover BEFORE locking/loading credentials, so the dir
-  // names and profile keys are coherent for this boot. No-op once the fleet is cut over.
-  const migration = migrateBotKeys()
-  if (migration.dirRenames.length || migration.profileRewrites.length || migration.warnings.length) {
-    process.stderr.write(
-      `telegram-runtime ${JSON.stringify({
-        ts: new Date().toISOString(),
-        evt: 'migrate-bot-keys',
-        dirRenames: migration.dirRenames,
-        profileRewrites: migration.profileRewrites,
-        warnings: migration.warnings,
-      })}\n`,
-    )
-  }
   for (const key of listBotKeys()) {
     releaseLocks.push(acquireBotLock(key))
     const credential = loadCredential(key)
@@ -4317,9 +4138,6 @@ async function main(): Promise<void> {
       return
     case 'bot':
       await botCommand(rest)
-      return
-    case 'migrate-bot-keys':
-      await migrateBotKeysCommand(rest)
       return
     case 'run':
       await runCommand()

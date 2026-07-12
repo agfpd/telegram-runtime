@@ -103,44 +103,6 @@ describe('runSelfConfig', () => {
     }
   })
 
-  test('legacy TELEGRAM_BOT (no explicit username) is accepted as the bot_username key', () => {
-    const cwd = sandboxCwd()
-    try {
-      const r = runSelfConfig({
-        env: { IAPEER_PEER_PERSONALITY: 'maria', TELEGRAM_BOT: 'maria_bot' },
-        cwd,
-      })
-      const profile = JSON.parse(readFileSync(r.profilePath, 'utf8'))
-      expect(profile.interfaces.telegram.bot_username).toBe('maria_bot')
-      expect('bot' in profile.interfaces.telegram).toBe(false)
-    } finally {
-      rmSync(cwd, { recursive: true, force: true })
-    }
-  })
-
-  test('strips a retired `bot` field from an existing profile on re-config', () => {
-    const cwd = sandboxCwd()
-    try {
-      const profilePath = join(cwd, '.iapeer', 'peer-profile.json')
-      mkdirSync(join(cwd, '.iapeer'), { recursive: true })
-      writeFileSync(
-        profilePath,
-        JSON.stringify({
-          personality: 'maria',
-          runtime: 'telegram',
-          intelligence: 'natural',
-          interfaces: { telegram: { bot: 'maria', activity: true } },
-        }),
-      )
-      runSelfConfig({ env: { IAPEER_PEER_PERSONALITY: 'maria', TELEGRAM_BOT_USERNAME: 'maria_bot' }, cwd })
-      const profile = JSON.parse(readFileSync(profilePath, 'utf8'))
-      expect(profile.interfaces.telegram.bot_username).toBe('maria_bot')
-      expect('bot' in profile.interfaces.telegram).toBe(false) // retired key removed
-      expect(profile.interfaces.telegram.activity).toBe(true) // unrelated field preserved
-    } finally {
-      rmSync(cwd, { recursive: true, force: true })
-    }
-  })
 
   test('preserves an existing telegram interface field (e.g. operator-set activity) on merge', () => {
     const cwd = sandboxCwd()

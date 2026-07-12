@@ -20,7 +20,7 @@
 //
 // OPERATOR INPUTS come via env at `iapeer create` time (the foundation forwards the
 // whole env into the hook): TELEGRAM_USER_ID → interfaces.telegram.user_id; the bot
-// @username (TELEGRAM_BOT_USERNAME, or the legacy TELEGRAM_BOT key as a fallback) →
+// @username (TELEGRAM_BOT_USERNAME) →
 // interfaces.telegram.bot_username — the NATURAL KEY that also names the credential dir
 // bots/<username>/.env (decision 2026-06-20). TELEGRAM_BOT_TOKEN → that credential .env
 // under the IAPEER_ROOT-aware bots registry. Absent inputs → the hook is still
@@ -131,10 +131,9 @@ export function runSelfConfig(opts: SelfConfigOptions = {}): SelfConfigOutcome {
   const profile = readRawProfile(profilePath)
 
   // Operator-supplied telegram presence (env, forwarded by the foundation). The bot
-  // @username is the natural key: prefer TELEGRAM_BOT_USERNAME, fall back to the legacy
-  // TELEGRAM_BOT key (provisioning that predates the cutover).
+  // @username (TELEGRAM_BOT_USERNAME) is the natural key.
   const userId = trimmed(env.TELEGRAM_USER_ID)
-  const botUsername = normalizeBotUsername(env.TELEGRAM_BOT_USERNAME) ?? normalizeBotUsername(env.TELEGRAM_BOT)
+  const botUsername = normalizeBotUsername(env.TELEGRAM_BOT_USERNAME)
   const token = trimmed(env.TELEGRAM_BOT_TOKEN)
 
   // Merge interfaces.telegram (preserve any existing telegram fields, e.g. an operator-
@@ -149,11 +148,8 @@ export function runSelfConfig(opts: SelfConfigOptions = {}): SelfConfigOutcome {
       ? { ...((interfaces as { telegram: Record<string, unknown> }).telegram) }
       : {}
   if (userId) telegram.user_id = userId
-  if (botUsername) telegram.bot_username = botUsername
   // The @username IS the catalog key and also names the credential dir bots/<username>/.
-  // The retired `bot` field (== personality duplicate) is stripped on every pass so an
-  // idempotent re-config cleans up any legacy value left from before the cutover.
-  delete telegram.bot
+  if (botUsername) telegram.bot_username = botUsername
   ;(interfaces as Record<string, unknown>).telegram = telegram
 
   // Identity stays the foundation's domain — spread the raw profile FIRST so every
@@ -166,7 +162,8 @@ export function runSelfConfig(opts: SelfConfigOptions = {}): SelfConfigOutcome {
   let botEnvPath: string | undefined
   if (botUsername && token) {
     // Credential dir keyed by @username; the .env records the same username so the dir
-    // name and TELEGRAM_BOT_USERNAME stay in lockstep (the invariant migrateBotKeys relies on).
+    // name and TELEGRAM_BOT_USERNAME stay in lockstep (the invariant listBotKeys/bot
+    // credential loading in cli.ts relies on).
     botEnvPath = writeBotCredential(env, botUsername, token, botUsername)
   }
 

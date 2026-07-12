@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { pickApprovalRoute } from '../src/cli.ts'
 
-type Dir = Map<string, { interfaces?: { telegram?: { bot_username?: string; bot?: string } } }>
+type Dir = Map<string, { interfaces?: { telegram?: { bot_username?: string } } }>
 
 function dir(entries: Record<string, string | null>): Dir {
   const m: Dir = new Map()
