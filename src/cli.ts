@@ -1583,6 +1583,11 @@ export function freshestRuntime(
 // path + the line parser — to the wrong, absent/stale claude artifacts, so BOTH the
 // typing and the tool-use/activity indicators silently died. Falls back to the declared
 // default when no pane-log exists yet (a never-run peer, for which no indicator fires).
+//
+// This is a CHEAP HEURISTIC LAYER ONLY (mtime, no pid check) — it is what backs the
+// per-tick busy-gate and can legitimately go stale for a few seconds around a runtime
+// flip (see resolveLiveRuntime below for the authoritative, verb-first resolution used
+// at turn start and to detect a flip mid-turn).
 export function liveRuntime(target: PeerRecord): string {
   const candidates = (target.runtimes?.length ? target.runtimes : [target.runtime]).map(
     runtime => {
@@ -1598,8 +1603,81 @@ export function liveRuntime(target: PeerRecord): string {
   return freshestRuntime(candidates, target.runtime)
 }
 
-function paneLogPath(target: PeerRecord): string {
-  return join(iapeerRoot(), 'logs', 'lifecycle', `${liveRuntime(target)}-${target.personality}.log`)
+// Pure: decide the peer's verified-live runtime from an `iapeer live-runtime <p>`
+// result. Isolated for testing — see resolveLiveRuntime for the caching/subprocess
+// wrapper. `declared` is the peer's declared runtime set (target.runtimes, or
+// [target.runtime] when empty); `fallback` is normally liveRuntime(target) (the
+// mtime heuristic) computed by the caller.
+//   - error / timedOut → the verb itself is broken: fall back, verbBroken=true (this
+//     is what trips the negative host-cache window in resolveLiveRuntime).
+//   - status 0 + non-empty trimmed stdout that IS one of `declared` → the verb's
+//     verdict wins, verbBroken=false.
+//   - status 0 + non-empty stdout that is NOT one of `declared` → defensive: the verb
+//     ran fine but answered something we don't recognize for this peer, so we don't
+//     trust it — fall back, but this is not a verb breakage (verbBroken=false).
+//   - status 1, or status 0 with empty stdout → a VALID "no live session" answer
+//     (peer asleep/unknown), not a breakage — fall back, verbBroken=false.
+//   - any other exit code → unexpected — fall back, verbBroken=true.
+export function pickVerifiedRuntime(
+  verb: { status: number | null; stdout: string; error?: Error; timedOut?: boolean },
+  declared: string[],
+  fallback: string,
+): { runtime: string; source: 'verb' | 'fallback'; verbBroken: boolean } {
+  if (verb.error || verb.timedOut) {
+    return { runtime: fallback, source: 'fallback', verbBroken: true }
+  }
+  const stdout = verb.stdout.trim()
+  if (verb.status === 0 && stdout) {
+    if (declared.includes(stdout)) {
+      return { runtime: stdout, source: 'verb', verbBroken: false }
+    }
+    return { runtime: fallback, source: 'fallback', verbBroken: false }
+  }
+  if (verb.status === 1 || (verb.status === 0 && !stdout)) {
+    return { runtime: fallback, source: 'fallback', verbBroken: false }
+  }
+  return { runtime: fallback, source: 'fallback', verbBroken: true }
+}
+
+// TTL for the positive per-peer cache below: a verb answer is trusted this long
+// before the next resolveLiveRuntime call pays for another subprocess.
+const LIVE_RUNTIME_TTL_MS = 5000
+// TTL for the negative host-wide cache: once the verb itself proves broken (missing
+// binary, crash, timeout, unexpected exit code — NOT a normal "no live session"
+// exit 1), stop paying a subprocess per turn for a window and just use the mtime
+// heuristic — protects a foundation host that doesn't have `live-runtime` yet (or
+// is otherwise unhealthy) from a subprocess on every single turn.
+const LIVE_RUNTIME_VERB_FAIL_TTL_MS = 60_000
+const liveRuntimeCache = new Map<string, { runtime: string; at: number }>()
+let liveRuntimeVerbFailedUntil = 0
+
+// Authoritative live-runtime resolution: verb-first (`iapeer live-runtime <p>`,
+// foundation ≥0.4.22 — reads pid-alive sessions, not mtime), falling back to the
+// cheap liveRuntime() heuristic when the verb is on cooldown or answers "no live
+// session". This is what closes the flip-race the mtime-only heuristic cannot: at
+// the instant a runtime switch happens, the just-died runtime's pane-log is
+// momentarily still the freshest by mtime, but the verb already knows it's gone.
+// Called at turn start (watchPeerTurn) and mid-turn to detect a flip; the TTL
+// caches bound how often the subprocess actually runs.
+export async function resolveLiveRuntime(target: PeerRecord): Promise<string> {
+  const cached = liveRuntimeCache.get(target.personality)
+  if (cached && Date.now() - cached.at < LIVE_RUNTIME_TTL_MS) return cached.runtime
+  if (Date.now() < liveRuntimeVerbFailedUntil) return liveRuntime(target)
+  const verb = await runControlBinary(resolveIapeerBin(), ['live-runtime', target.personality], 4000)
+  const declared = target.runtimes?.length ? target.runtimes : [target.runtime]
+  const picked = pickVerifiedRuntime(verb, declared, liveRuntime(target))
+  if (picked.verbBroken) {
+    liveRuntimeVerbFailedUntil = Date.now() + LIVE_RUNTIME_VERB_FAIL_TTL_MS
+    return picked.runtime
+  }
+  if (picked.source === 'verb') {
+    liveRuntimeCache.set(target.personality, { runtime: picked.runtime, at: Date.now() })
+  }
+  return picked.runtime
+}
+
+function paneLogPath(target: PeerRecord, rt: string = liveRuntime(target)): string {
+  return join(iapeerRoot(), 'logs', 'lifecycle', `${rt}-${target.personality}.log`)
 }
 
 // Milliseconds since the peer's pane-log last advanced (= since its last byte of
@@ -1608,9 +1686,9 @@ function paneLogPath(target: PeerRecord): string {
 // including through thinking pauses); a large/growing age = the turn has ended and
 // the prompt is quiescent. null if the log is missing/unreadable — callers treat
 // that as idle (a missing log = no live peer output to stream).
-function paneLogAgeMs(target: PeerRecord): number | null {
+function paneLogAgeMs(target: PeerRecord, rt: string = liveRuntime(target)): number | null {
   try {
-    return Date.now() - statSync(paneLogPath(target)).mtimeMs
+    return Date.now() - statSync(paneLogPath(target, rt)).mtimeMs
   } catch {
     return null
   }
@@ -2099,8 +2177,8 @@ type TranscriptReader = { poll: () => ToolEvent[]; contextTokens: () => number |
 function createTranscriptReader(
   target: PeerRecord,
   isOperator?: (personality: string) => boolean,
+  rt: string = liveRuntime(target),
 ): TranscriptReader | null {
-  const rt = liveRuntime(target)
   const path = activeTranscriptPath(target, rt)
   if (!path) return null
   const parse = rt === 'codex' ? codexLineEvents : claudeLineEvents
@@ -2176,9 +2254,14 @@ async function watchPeerTurn(
   if (activeWatchers.has(target.personality)) return
   activeWatchers.add(target.personality)
 
-  const reader = activityOn ? createTranscriptReader(target, isOperator) : null
+  // Authoritative resolution ONCE at turn start (verb-first, TTL-cached) — closes the
+  // flip-race the mtime-only liveRuntime() heuristic cannot (see resolveLiveRuntime).
+  // Threaded explicitly through the reader + busy-gate below so both key off the SAME
+  // runtime; re-checked mid-turn further down (a flip mid-turn re-resolves `rt`).
+  let rt = await resolveLiveRuntime(target)
+  let reader = activityOn ? createTranscriptReader(target, isOperator, rt) : null
   if (activityOn && !reader) {
-    logActivity('reader.none', { peer: target.personality, runtime: liveRuntime(target), cwd: target.cwd })
+    logActivity('reader.none', { peer: target.personality, runtime: rt, cwd: target.cwd })
   }
   // Splash verb shown at the top. Picked now so it appears the instant the turn
   // starts (before any tool_use — like the typing indicator), and re-picked on
@@ -2315,8 +2398,29 @@ async function watchPeerTurn(
       // the whole turn is what re-enables BOTH channels. The TYPING_MIN_MS grace
       // covers the startup window before the peer's first byte; a missing log
       // (age null) reads as idle, exactly as the old null pane did.
-      const age = paneLogAgeMs(target)
+      const age = paneLogAgeMs(target, rt)
       const busy = age !== null && age < PANELOG_BUSY_MS
+      // Cheap sync suspicion that `rt` has gone stale (a runtime flip happened
+      // mid-turn): the mtime heuristic now disagrees with the runtime we resolved
+      // at turn start. Reverify with the authoritative verb before acting on it —
+      // resolveLiveRuntime's own TTL cache bounds how often that subprocess runs.
+      if (liveRuntime(target) !== rt) {
+        const verified = await resolveLiveRuntime(target)
+        if (verified !== rt) {
+          logActivity('runtime-flip', { peer: target.personality, from: rt, to: verified })
+          rt = verified
+          if (reader) {
+            // Re-tail the NEW runtime's transcript from its current EOF. Any
+            // gestures the new runtime emitted before this swap are deliberately
+            // lost — this channel is a live indicator, not a durable journal, and
+            // mixing two runtimes' events in one status message would be worse.
+            const next = createTranscriptReader(target, isOperator, rt)
+            // A failed re-create keeps the stale reader alive: a stale-but-open
+            // tail beats killing the channel outright mid-turn.
+            if (next) reader = next
+          }
+        }
+      }
       if (busy || Date.now() - started < TYPING_MIN_MS) {
         if (typingOn) await bot.api.sendChatAction(chatId, 'typing').catch(() => {})
       } else {
@@ -2628,7 +2732,7 @@ export async function handleRuntimeSwitchCommand(
   // No-op ONLY when <toRuntime> is already BOTH the default (target.runtime = default_runtime)
   // AND the live runtime. A peer live-on-X but default-still-Y still needs the persist, so the
   // live check alone is insufficient for the permanent-switch semantic.
-  if (target.runtime === toRuntime && liveRuntime(target) === toRuntime) {
+  if (target.runtime === toRuntime && (await resolveLiveRuntime(target)) === toRuntime) {
     await bot.api.sendMessage(chatId, `already on ${toRuntime}`).catch(() => {})
     return
   }

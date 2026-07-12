@@ -14,6 +14,7 @@ import {
   claudeProjectDirName,
   parseActivityCommand,
   freshestRuntime,
+  pickVerifiedRuntime,
 } from '../src/cli.ts'
 
 describe('shortToolName — MCP prefix stripped to the bare gesture', () => {
@@ -391,6 +392,64 @@ describe('freshestRuntime — the peer’s LIVE runtime = its freshest pane-log'
   })
   test('single candidate present → it', () => {
     expect(freshestRuntime([{ runtime: 'codex', mtimeMs: 42 }], 'claude')).toBe('codex')
+  })
+})
+
+describe('pickVerifiedRuntime — verb-first resolution, closing the flip-race', () => {
+  test('verb wins over the fallback, including when they disagree', () => {
+    expect(
+      pickVerifiedRuntime({ status: 0, stdout: 'codex' }, ['claude', 'codex'], 'claude'),
+    ).toEqual({ runtime: 'codex', source: 'verb', verbBroken: false })
+    // Agreement is also a "verb wins" case — the verb's verdict is still what's cached.
+    expect(
+      pickVerifiedRuntime({ status: 0, stdout: 'claude' }, ['claude', 'codex'], 'claude'),
+    ).toEqual({ runtime: 'claude', source: 'verb', verbBroken: false })
+  })
+
+  test('exit 1 (no live session) → fallback, not a verb breakage', () => {
+    expect(
+      pickVerifiedRuntime({ status: 1, stdout: '' }, ['claude', 'codex'], 'claude'),
+    ).toEqual({ runtime: 'claude', source: 'fallback', verbBroken: false })
+  })
+
+  test('empty stdout (status 0) → fallback, not a verb breakage', () => {
+    expect(
+      pickVerifiedRuntime({ status: 0, stdout: '   ' }, ['claude', 'codex'], 'claude'),
+    ).toEqual({ runtime: 'claude', source: 'fallback', verbBroken: false })
+  })
+
+  test('error → fallback, verbBroken=true', () => {
+    expect(
+      pickVerifiedRuntime(
+        { status: null, stdout: '', error: new Error('spawn ENOENT') },
+        ['claude', 'codex'],
+        'claude',
+      ),
+    ).toEqual({ runtime: 'claude', source: 'fallback', verbBroken: true })
+  })
+
+  test('timedOut → fallback, verbBroken=true', () => {
+    expect(
+      pickVerifiedRuntime({ status: null, stdout: '', timedOut: true }, ['claude', 'codex'], 'claude'),
+    ).toEqual({ runtime: 'claude', source: 'fallback', verbBroken: true })
+  })
+
+  test('unexpected non-0/1 exit code → fallback, verbBroken=true', () => {
+    expect(
+      pickVerifiedRuntime({ status: 2, stdout: '' }, ['claude', 'codex'], 'claude'),
+    ).toEqual({ runtime: 'claude', source: 'fallback', verbBroken: true })
+  })
+
+  test('verb answers a runtime OUTSIDE the peer\'s declared set → fallback (defensive), not a verb breakage', () => {
+    expect(
+      pickVerifiedRuntime({ status: 0, stdout: 'gemini' }, ['claude', 'codex'], 'claude'),
+    ).toEqual({ runtime: 'claude', source: 'fallback', verbBroken: false })
+  })
+
+  test('stdout whitespace is trimmed before comparison', () => {
+    expect(
+      pickVerifiedRuntime({ status: 0, stdout: '  codex\n' }, ['claude', 'codex'], 'claude'),
+    ).toEqual({ runtime: 'codex', source: 'verb', verbBroken: false })
   })
 })
 

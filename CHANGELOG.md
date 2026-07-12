@@ -10,7 +10,20 @@ predates the public repository.
 
 ## [Unreleased]
 
-## [0.24.0] - 2026-07-12
+## [0.25.0] - 2026-07-12
+
+### Added
+- Live-runtime resolution hardened against the runtime-flip race. The freshest-pane-log
+  heuristic (`liveRuntime`) can briefly pick the just-died runtime at a fast `/claude`↔`/codex`
+  switch boundary, keying a whole turn's typing/tool-use indicators to dead artifacts (live
+  incident 2026-06-22: an active turn rendered 0 steps). Turn start now resolves the runtime
+  authoritatively via the foundation verb `iapeer live-runtime <peer>` (reads pid-alive pty
+  sessions; foundation ≥0.4.22) with the mtime heuristic as fallback — new
+  `resolveLiveRuntime` with a 5s per-peer cache and a 60s negative window so a foundation
+  without the verb keeps the old behavior at zero extra cost. Mid-turn, the pane loop watches
+  for heuristic/resolved disagreement and, on a verb-confirmed flip, re-keys the busy-gate and
+  re-tails the new runtime's transcript in place (`runtime-flip` activity event). The
+  `/<runtime>` switch no-op guard uses the verified resolution too.
 
 ### Changed
 - grammy bumped `^1.21.0` → `^1.44.0`: `@grammyjs/types` 3.28 ships the Bot API 10.1
