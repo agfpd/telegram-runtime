@@ -10,6 +10,36 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-07-06
+
+### Fixed
+- `onboard-approval` is cwd-clean: the verb no longer depends on the invoking working
+  directory, so it runs identically from any location.
+
+## [0.22.0] - 2026-07-06
+
+### Added
+- Approval service-bot `@approver_iapeer_bot` and the FACELESS route (Ф3 U4): peers without
+  their own Telegram bot (implementers, infra) get their approval cards in the single
+  dedicated approval bot — a pure telegram-runtime service bot, no foundation peer behind it.
+  `onboard-approval` provisions it, with a DOUBLE warning when the operator declines.
+
+## [0.21.0] - 2026-07-06
+
+### Added
+- Human-approval Telegram channel (Ф3 U1–U3) on top of the iapeer broker queue: fleet-API
+  client with feature-detect (U1 — a host without the broker degrades silently), an
+  approval-face SSE consumer with a dedup/reconcile state machine (U2 — restarts re-attach to
+  pending requests without duplicate cards), and Allow/Deny cards carrying the VERBATIM action
+  content with a `callback_query` handler gated to the owner (U3). A resolution from any
+  channel (Telegram tap, CLI) extinguishes the request everywhere — single-queue invariant.
+
+## [0.20.5] - 2026-06-23
+
+### Fixed
+- Rich outbound: a single `\n` renders as a line break (GFM hard break) instead of being
+  swallowed by paragraph folding.
+
 ## [0.20.4] - 2026-06-23
 
 ### Added
