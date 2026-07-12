@@ -10,6 +10,15 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-07-12
+
+### Changed
+- grammy bumped `^1.21.0` → `^1.44.0`: `@grammyjs/types` 3.28 ships the Bot API 10.1
+  `sendRichMessage` typing, so the rich outbound call is now natively typed through
+  `bot.api.raw` — the transitional name-keyed-Proxy cast in `sendRichResilient` is removed
+  (the follow-up the 0.14.0 rich adoption left open). No behavioral change: the payload shape
+  is identical, the typecheck now proves it against the API schema.
+
 ## [0.23.0] - 2026-07-12
 
 ### Removed

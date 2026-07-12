@@ -66,11 +66,11 @@ const IAP_SEND_TIMEOUT_MS = Number(process.env.TELEGRAM_IAP_SEND_TIMEOUT_MS ?? '
 // with GitHub Flavored Markdown where possible"): headings, lists, tables,
 // quotes and code render natively on the owner's client. Doc limits: 32768
 // characters / 500 blocks (vs 4096 for sendMessage) — one rich send replaces
-// chunking for any realistic report. grammy 1.43.0 carries no 10.1 typings yet;
-// the call goes through `bot.api.raw`, a Proxy keyed on method name, so it
-// works at runtime today (cast at the call site). Every failure falls back to
-// the legacy chunked MarkdownV2→plain path — rich can degrade, never lose a
-// message. Kill switch: TELEGRAM_RICH=0.
+// chunking for any realistic report. The call goes through `bot.api.raw`,
+// typed natively since grammy 1.44.0 (@grammyjs/types 3.28 ships the 10.1
+// `sendRichMessage` method). Every failure falls back to the legacy chunked
+// MarkdownV2→plain path — rich can degrade, never lose a message. Kill
+// switch: TELEGRAM_RICH=0.
 const RICH_OUTBOUND_ENABLED = process.env.TELEGRAM_RICH !== '0'
 // The docs say "32768 UTF-8 characters"; whether that counts code points or
 // UTF-8 bytes is unverified — we gate on JS .length as the approximation and
@@ -3413,12 +3413,8 @@ export function hardenSoftBreaks(text: string): string {
 // gets its own retry budget before the envelope is declared undeliverable.
 // Same timeout discipline as chunks: AbortSignal.timeout scoped to this send.
 export async function sendRichResilient(bot: Bot, chatId: string, text: string): Promise<boolean> {
-  // grammy 1.43.0 has no sendRichMessage typing; raw is a Proxy keyed on the
-  // method name (verified in grammy's client.js), so the call reaches HTTP.
-  const rawApi = bot.api.raw as unknown as Record<
-    string,
-    (payload: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>
-  >
+  // Typed natively: grammy ≥1.44.0 (@grammyjs/types 3.28) ships the Bot API
+  // 10.1 `sendRichMessage` raw method — the pre-1.44 name-keyed-Proxy cast is gone.
   for (let attempt = 0; attempt <= OUTBOUND_SEND_RETRIES; attempt++) {
     const startedAt = Date.now()
     logOutbound('rich.start', {
@@ -3430,7 +3426,7 @@ export async function sendRichResilient(bot: Bot, chatId: string, text: string):
       queueDepth: outboundQueueDepth,
     })
     try {
-      await rawApi.sendRichMessage(
+      await bot.api.raw.sendRichMessage(
         { chat_id: chatId, rich_message: { markdown: text } },
         AbortSignal.timeout(OUTBOUND_SEND_TIMEOUT_MS),
       )
