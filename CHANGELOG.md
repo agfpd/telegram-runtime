@@ -10,6 +10,43 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-07-14
+
+### Fixed
+- IAP envelope parser synchronized with the core codec's decoder (iapeer
+  `src/codec/index.ts`, envelope-compaction F, 0.4.86) — near-verbatim port, closing two
+  inherited defect classes the core had already fixed (В37) plus one latent mine:
+  - **В37, open-tag scan is now CDATA-aware** (`readTagContent` replaces `tagContent`): the
+    opening `<attachments>`/`<message>` was located with a bare `indexOf`, so a message whose
+    CDATA body *quoted* `<attachments>…</attachments>` minted phantom attachments, and an
+    attachment path quoting `<message>fake</message>` hijacked the real message body.
+    Realistic trigger: a peer forwarding an example envelope to the owner.
+  - **Name-anchored attribute lookup** (`attrValue`): the unanchored regex let `runtime="`
+    match the tail of `from-runtime="…"` — coincidentally correct today, a mine under
+    attribute reordering and under the read-both decode below.
+- CDATA-section handling in the tag reader now concatenates adjacent sections (reversing the
+  sender's `]]>` split) and treats an unterminated section as raw remainder instead of
+  failing the whole tag.
+
+### Added
+- **В38 open-tag validation** in `extractIapEnvelopes` (`openTagVerdict` + one-char resync):
+  prose that merely contains `<iap ` (e.g. a quoted tool description) no longer swallows the
+  next real envelope into an undecodable blob nor parks the stdin buffer forever; a '>'-less
+  run is released once it exceeds the 1 KiB open-tag bound, while a genuinely chunk-split
+  open tag still waits for the next chunk.
+- **Read-both decode** (`parseIapEnvelope`): accepts the compact presentation names
+  (`from`/`runtime`/`intelligence`, `<msg>`) alongside the legacy wire names, short names
+  winning — a future wire flip to short names lands as a no-op. The additive `ts` attribute
+  is decoded into the new optional `sentAt` envelope field; legacy `from-intelligence`
+  values normalize read-compat (`human`→`natural`, `scripted`→`absent`, unknown dropped).
+- Adversarial test suite ported from the core's `codec.test.ts` (quoted-tags-in-CDATA,
+  attribute-order anchor case, false-start/resync/parking, compact-format decode); each
+  case reproduced red on the pre-port parser.
+
+One deliberate divergence from the core codec is kept: the CR→LF fold stays in
+`parseIapEnvelope` — the core moved it out as a transport concern, and this parser IS the
+telegram transport adapter (raw pty stdin surfaces bare CRs).
+
 ## [0.25.0] - 2026-07-12
 
 ### Added

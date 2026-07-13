@@ -159,6 +159,21 @@ function isIntelligence(value: unknown): value is Intelligence {
   return value === 'natural' || value === 'artificial' || value === 'absent'
 }
 
+// Read-compat normalizer for an intelligence value coming off the wire (canon:
+// core normalizeIntelligenceValue). Legacy envelopes in disk queues / historic
+// transcripts may still carry the pre-contract vocabulary: human → natural,
+// scripted → absent; a genuinely unknown value is dropped, not invented.
+const LEGACY_INTELLIGENCE: Readonly<Record<string, Intelligence>> = {
+  human: 'natural',
+  scripted: 'absent',
+}
+
+function normalizeIntelligenceValue(value: unknown): Intelligence | undefined {
+  if (typeof value !== 'string') return undefined
+  if (isIntelligence(value)) return value
+  return LEGACY_INTELLIGENCE[value]
+}
+
 type PeerProfile = {
   personality: string
   runtime: string
@@ -211,6 +226,9 @@ type IapEnvelope = {
   fromPersonality: string
   fromRuntime: string
   fromIntelligence?: Intelligence
+  /** The sender's dispatch instant (`ts` attribute, envelope-compaction F) —
+   *  full local ISO on the wire; absent on legacy envelopes. */
+  sentAt?: string
   topic?: string
   attachments: string[]
   message: string
@@ -1098,13 +1116,29 @@ async function sendFileViaRawApi(args: {
   return Number(json.result?.message_id ?? 0)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IAP envelope parser — near-verbatim port of the core codec's decoder half
+// (iapeer src/codec/index.ts, envelope-compaction F, 0.4.86): CDATA-aware scans
+// on BOTH tags (В37), В38 open-tag validation, read-both attribute/tag names,
+// name-anchored attr lookup. ONE deliberate divergence: the CR→LF fold stays in
+// parseIapEnvelope — the core moved it out as a transport concern, and this
+// parser IS the telegram transport adapter (raw pty stdin surfaces bare CRs).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** NAME-ANCHORED attribute lookup. The anchor `(^|\s)` is load-bearing: the old
+ *  unanchored regex made `runtime="` match the TAIL of `from-runtime="…"` (and
+ *  `intelligence="` the tail of `from-intelligence="…"`) — a latent mine the
+ *  read-both decode below would have stepped on (the short-name lookup must NOT
+ *  be satisfied by a legacy long-name attribute). */
 function attrValue(attrs: string, name: string): string | undefined {
-  const re = new RegExp(`${name}="([^"]*)"`)
+  const re = new RegExp(`(?:^|\\s)${name}="([^"]*)"`)
   const m = re.exec(attrs)
   return m ? unescapeAttr(m[1]) : undefined
 }
 
 function unescapeAttr(value: string): string {
+  // Reverse of the sender's escapeAttr. Order matters: &amp; LAST so an escaped
+  // "&amp;lt;" in the source does not get double-decoded.
   return value
     .replace(/&quot;/g, '"')
     .replace(/&lt;/g, '<')
@@ -1112,79 +1146,104 @@ function unescapeAttr(value: string): string {
     .replace(/&amp;/g, '&')
 }
 
-function decodeCdata(inner: string): string {
-  if (!inner.startsWith('<![CDATA[') || !inner.endsWith(']]>')) return inner
-  return inner.slice('<![CDATA['.length, -']]>'.length).replaceAll(']]]]><![CDATA[>', ']]>')
-}
+const CDATA_OPEN = '<![CDATA['
+const CDATA_CLOSE = ']]>'
 
-// Find `needle` in `s` at/after `from`, ignoring any occurrence INSIDE a
-// <![CDATA[ … ]]> section. The IAP sender CDATA-wraps the message and
-// attachments, so a body that literally contains "</message>" or "</iap>" (an
-// agent quoting the envelope's own tag names) must NOT be mistaken for the
-// structural closing tag — otherwise the envelope is truncated and the message
-// is lost or corrupted. The sender's "]]>" escape (`]]]]><![CDATA[>`) is a CDATA
-// close immediately followed by a reopen, so a plain open/close state toggle
-// skips it correctly without special-casing. With no CDATA present this behaves
-// exactly like indexOf, so legacy non-CDATA envelopes are unaffected.
-function indexOfOutsideCdata(s: string, needle: string, from = 0): number {
-  let i = from
-  let inCdata = false
-  while (i < s.length) {
-    if (inCdata) {
-      if (s.startsWith(']]>', i)) {
-        inCdata = false
-        i += 3
-        continue
-      }
-      i++
+/**
+ * Scan from `start` and return the index of the first occurrence of `needle`
+ * that lies OUTSIDE any CDATA section, or -1 if none (or if an unterminated
+ * CDATA section is hit — meaning the buffer is incomplete and the caller should
+ * wait for more input). CDATA sections are skipped wholesale: `]]>` inside them
+ * is the section terminator, never a match for `needle`. The IAP sender
+ * CDATA-wraps the message and attachments, so a body that literally contains
+ * "</message>" or "</iap>" (an agent quoting the envelope's own tag names) must
+ * NOT be mistaken for the structural closing tag.
+ */
+function indexOfOutsideCdata(buffer: string, needle: string, start: number): number {
+  let i = start
+  while (i < buffer.length) {
+    if (buffer.startsWith(CDATA_OPEN, i)) {
+      const term = buffer.indexOf(CDATA_CLOSE, i + CDATA_OPEN.length)
+      if (term < 0) return -1 // unterminated CDATA → incomplete buffer
+      i = term + CDATA_CLOSE.length
       continue
     }
-    if (s.startsWith('<![CDATA[', i)) {
-      inCdata = true
-      i += '<![CDATA['.length
-      continue
-    }
-    if (s.startsWith(needle, i)) return i
+    if (buffer.startsWith(needle, i)) return i
     i++
   }
   return -1
 }
 
-function tagContent(xml: string, tag: string): string | undefined {
+/**
+ * Extract and decode the content of `<tag>…</tag>`, treating the body as a
+ * sequence of CDATA sections (and any stray raw text) and concatenating them.
+ * Concatenating adjacent CDATA sections is exactly what reverses the
+ * `]]>` → `]]]]><![CDATA[>` split the sender performs, so this both
+ * (a) ignores `</tag>` / `</iap>` that appear inside CDATA, and
+ * (b) reconstructs a literal `]]>` in the original payload.
+ * В37 — the OPEN tag is located CDATA-aware too (the close-side already was): a
+ * message whose CDATA body QUOTES `<attachments>…</attachments>` otherwise
+ * minted phantom attachments, and a quoted `<message>` corrupted the decoded
+ * message. Returns undefined when the open tag is absent or the close tag is
+ * never reached outside CDATA.
+ */
+function readTagContent(xml: string, tag: string): string | undefined {
   const open = `<${tag}>`
-  const start = xml.indexOf(open)
-  if (start < 0) return undefined
-  const innerStart = start + open.length
-  // Close on the structural </tag>, skipping identical tag text inside CDATA.
-  const end = indexOfOutsideCdata(xml, `</${tag}>`, innerStart)
-  if (end < 0) return undefined
-  return decodeCdata(xml.slice(innerStart, end))
+  const close = `</${tag}>`
+  const openIdx = indexOfOutsideCdata(xml, open, 0)
+  if (openIdx < 0) return undefined
+  let i = openIdx + open.length
+  let out = ''
+  while (i < xml.length) {
+    if (xml.startsWith(CDATA_OPEN, i)) {
+      const term = xml.indexOf(CDATA_CLOSE, i + CDATA_OPEN.length)
+      if (term < 0) {
+        // Unterminated CDATA — malformed; treat the remainder as raw content.
+        out += xml.slice(i + CDATA_OPEN.length)
+        return out
+      }
+      out += xml.slice(i + CDATA_OPEN.length, term)
+      i = term + CDATA_CLOSE.length
+      continue
+    }
+    if (xml.startsWith(close, i)) return out
+    out += xml[i]
+    i++
+  }
+  return undefined // close tag never found
 }
 
+/** READ-BOTH decoder: accepts the legacy wire names (`from-personality` /
+ *  `from-runtime` / `from-intelligence`, `<message>`) AND the compact
+ *  presentation names (`from` / `runtime` / `intelligence`, `<msg>`) — so any
+ *  envelope form ever emitted on this host decodes, and a future wire flip to
+ *  the short names lands here as a no-op. Short names win when both are present. */
 export function parseIapEnvelope(xml: string): IapEnvelope {
-  // Normalize line endings before parsing. Defensive and transport-agnostic: a
-  // raw-mode pty stdin can surface bare CRs instead of LFs, and Telegram does not
-  // render \r as a line break, so multi-line replies (and code blocks) would
-  // collapse to one paragraph. Fold \r\n and lone \r → \n once, over the whole
-  // envelope: message and attachments both come out LF-terminated. The attachments
-  // split (/\r?\n/) and the MarkdownV2 converter are unaffected — they key on \n.
+  // Normalize line endings before parsing (transport concern — see the section
+  // header): a raw-mode pty stdin can surface bare CRs instead of LFs, and
+  // Telegram does not render \r as a line break, so multi-line replies (and code
+  // blocks) would collapse to one paragraph. Fold \r\n and lone \r → \n once,
+  // over the whole envelope: message and attachments both come out LF-terminated.
   xml = xml.replace(/\r\n?/g, '\n')
   const open = /^<iap\s+([^>]*)>/.exec(xml.trim())
   if (!open) throw new TelegramRuntimeError('invalid IAP envelope: missing <iap ...>')
-  const fromPersonality = attrValue(open[1], 'from-personality')
-  const fromRuntime = attrValue(open[1], 'from-runtime')
+  const fromPersonality = attrValue(open[1], 'from') ?? attrValue(open[1], 'from-personality')
+  const fromRuntime = attrValue(open[1], 'runtime') ?? attrValue(open[1], 'from-runtime')
   if (!fromPersonality || !fromRuntime) {
     throw new TelegramRuntimeError('invalid IAP envelope: missing from-personality/from-runtime')
   }
-  const fromIntelligenceRaw = attrValue(open[1], 'from-intelligence')
-  const fromIntelligence = isIntelligence(fromIntelligenceRaw) ? fromIntelligenceRaw : undefined
-  const message = tagContent(xml, 'message')
+  const fromIntelligence = normalizeIntelligenceValue(
+    attrValue(open[1], 'intelligence') ?? attrValue(open[1], 'from-intelligence'),
+  )
+  const message = readTagContent(xml, 'message') ?? readTagContent(xml, 'msg')
   if (message === undefined) throw new TelegramRuntimeError('invalid IAP envelope: missing message')
-  const attachmentsRaw = tagContent(xml, 'attachments')
+  const attachmentsRaw = readTagContent(xml, 'attachments')
+  const sentAt = attrValue(open[1], 'ts')
   return {
     fromPersonality,
     fromRuntime,
     ...(fromIntelligence ? { fromIntelligence } : {}),
+    ...(sentAt ? { sentAt } : {}),
     topic: attrValue(open[1], 'topic'),
     attachments: attachmentsRaw
       ? attachmentsRaw.split(/\r?\n/).map(item => item.trim()).filter(Boolean)
@@ -1193,22 +1252,71 @@ export function parseIapEnvelope(xml: string): IapEnvelope {
   }
 }
 
+// В38 — a real envelope's open tag is bounded: personality/runtime ≤32 chars each,
+// topic ≤200, intelligence one word, plus attr names and escaping. 1 KiB is far above
+// any legitimate open tag; a longer '>'-less run after `<iap ` is prose, not a tag.
+const MAX_OPEN_TAG_LEN = 1024
+
+/** Classify the text at a `<iap ` occurrence: a complete VALID open tag (required attrs
+ *  present), a complete-but-INVALID one / overlong tagless run (prose that merely contains
+ *  the marker), or INCOMPLETE (no '>' yet within bounds — wait for the next chunk). */
+function openTagVerdict(candidate: string): 'valid' | 'invalid' | 'incomplete' {
+  const m = /^<iap\s+([^>]*)>/.exec(candidate)
+  if (!m) {
+    const unclosed = candidate.indexOf('>') < 0
+    return unclosed && candidate.length <= MAX_OPEN_TAG_LEN ? 'incomplete' : 'invalid'
+  }
+  if (m[0].length > MAX_OPEN_TAG_LEN) return 'invalid'
+  // Read-both: a real open tag carries the required pair under EITHER naming —
+  // legacy wire (from-personality/from-runtime) or compact presentation
+  // (from/runtime, name-anchored so a legacy tail never satisfies it).
+  const hasPersonality = m[1].includes('from-personality="') || /(?:^|\s)from="/.test(m[1])
+  const hasRuntime = m[1].includes('from-runtime="') || /(?:^|\s)runtime="/.test(m[1])
+  return hasPersonality && hasRuntime ? 'valid' : 'invalid'
+}
+
+/**
+ * Pull complete `<iap …>…</iap>` envelopes out of a streaming buffer.
+ * The closing `</iap>` is located CDATA-aware, so an envelope whose message
+ * body contains the literal text `</iap>` is not truncated. `rest` holds the
+ * trailing bytes that do not yet form a complete envelope (incl. an envelope
+ * still mid-CDATA), to be prepended to the next chunk.
+ *
+ * В38 — a FALSE start (prose that merely contains `<iap `, e.g. a quoted tool
+ * description) is never committed to: the open tag is validated first, and a
+ * candidate whose decode fails RESYNCS one char forward instead of being kept
+ * (which used to either swallow the NEXT real envelope into a mis-attributed
+ * blob, or park the buffer forever waiting for a close that never comes).
+ */
 export function extractIapEnvelopes(buffer: string): { envelopes: string[]; rest: string } {
   const envelopes: string[] = []
   let rest = buffer
   while (true) {
     const start = rest.indexOf('<iap ')
     if (start < 0) {
-      return { envelopes, rest: rest.slice(Math.max(0, rest.length - 8)) }
+      // Keep a small tail in case `<iap ` is split across chunk boundaries.
+      return { envelopes, rest: rest.slice(Math.max(0, rest.length - '<iap '.length)) }
     }
     if (start > 0) rest = rest.slice(start)
-    // The envelope-closing </iap> must be matched OUTSIDE any CDATA: a message
-    // body that literally contains "</iap>" is CDATA-wrapped by the sender and
-    // must not truncate the envelope here (which would drop the message).
-    const end = indexOfOutsideCdata(rest, '</iap>')
-    if (end < 0) return { envelopes, rest }
-    const envelopeEnd = end + '</iap>'.length
-    envelopes.push(rest.slice(0, envelopeEnd))
+    const verdict = openTagVerdict(rest)
+    if (verdict === 'incomplete') return { envelopes, rest } // open tag split across chunks → wait
+    if (verdict === 'invalid') {
+      rest = rest.slice(1) // false start: skip past this '<' and rescan for the next '<iap '
+      continue
+    }
+    const close = indexOfOutsideCdata(rest, '</iap>', '<iap '.length)
+    if (close < 0) return { envelopes, rest } // incomplete (or mid-CDATA) → wait
+    const envelopeEnd = close + '</iap>'.length
+    const candidate = rest.slice(0, envelopeEnd)
+    try {
+      parseIapEnvelope(candidate)
+    } catch {
+      // Structurally envelope-shaped but undecodable → a false start after all;
+      // resync so a REAL envelope inside/behind the candidate is still found.
+      rest = rest.slice(1)
+      continue
+    }
+    envelopes.push(candidate)
     rest = rest.slice(envelopeEnd)
   }
 }
