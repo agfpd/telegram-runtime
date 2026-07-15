@@ -60,6 +60,8 @@ So the daemon reports it, and the bridge carries it to Telegram. When the daemon
 
 Unlike a card, a notice has **no buttons**. It is information, not a request: there is nothing to decide and nothing to resolve. Repeats do not spam — the daemon folds every re-occurrence into one notice with a `×N` count, and the bridge renders that count rather than counting for itself.
 
+**A bridge restart is not news.** Whatever is already on the board when the bridge starts is adopted silently: the owner was told about those mutes by the instance being replaced, and re-sending them would turn every deploy into a notification about something he read an hour ago. Only mutes raised while the bridge is running are sent. Nothing is lost that matters — a peer still mute when its notice expires gets a fresh one from the daemon. Approval cards are deliberately the opposite: a request has a deadline and a blocked human behind it, so a restart re-renders the pending queue.
+
 **When the runtime states no reset time, the message says so plainly** rather than guessing. Claude, for one, never says when a per-model bucket lifts — and the 5h/7d reset shown in the statusline belongs to a *different* limit, so substituting it would be a confident lie. An absent field always means "the runtime did not say", never "there is no limit".
 
 The feature is inert against a daemon that does not serve the notice board, and can be switched off with `TELEGRAM_NOTICES=0` — independently of approvals, since silencing cards must never silence mute reporting.

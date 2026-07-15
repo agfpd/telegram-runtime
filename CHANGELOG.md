@@ -10,6 +10,28 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-07-15
+
+### Fixed
+
+- **A runtime restart no longer re-notifies the owner about mutes he has already
+  read.** The notice face's connect-time reconcile treated everything on the board
+  as "raised while I was disconnected — tell the owner late rather than never".
+  True for a mid-life SSE reconnect; wrong at process start, where the board holds
+  notices a PREVIOUS instance already delivered. Caught by the 0.27.0 deploy
+  itself: the restart re-sent all five live cards, so the owner was notified by
+  OUR deploy about mutes he had read 15 minutes earlier.
+  - The first SUCCESSFUL board read now SEEDS the dedup guard silently
+    (`notice.face.seeded`); only notices raised while the face is running are sent.
+    Gated on success, so a failed first read cannot burn the seed and let the retry
+    mistake a pre-existing board for fresh news.
+  - Bounded by design: a notice is one-way and nobody waits on it, so staying quiet
+    costs at most one TTL — if the peer is still mute the daemon raises a fresh
+    notice, and if it recovered there was nothing to say.
+  - **Approvals are deliberately NOT seeded**: a request carries a 300 s deadline
+    and a blocked human, so a restart must re-render the pending queue. The
+    asymmetry is the point, and matches web-runtime's face.
+
 ## [0.27.0] - 2026-07-15
 
 ### Added

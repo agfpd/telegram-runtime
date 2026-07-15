@@ -178,6 +178,9 @@ export class FleetFace {
    *  id leaves the board, which is what keeps docs/19 obligation 5 (ids are NOT stable
    *  across a daemon restart) from silently swallowing a re-issued `n1`. */
   private readonly noticed = new Set<string>()
+  /** Whether the board has ever been read successfully. Gates the one-time silent seed —
+   *  see reconcileNotices for why a restart must not re-notify. */
+  private noticesSeeded = false
   private controller: AbortController | null = null
   private reconcileTimer: ReturnType<typeof setInterval> | null = null
   private running = false
@@ -315,14 +318,26 @@ export class FleetFace {
   }
 
   /** Reconcile against the authoritative notice board. Sends any live notice not yet sent
-   *  (recovering a raise that landed while we were disconnected — the owner is told late
-   *  rather than never), then RELEASES the guard for every id that has left the board.
+   *  (recovering a raise that landed while we were disconnected mid-life — the owner is
+   *  told late rather than never), then RELEASES the guard for every id that has left the
+   *  board.
    *
    *  That release is load-bearing, not tidiness: notice ids are in-memory counters and a
    *  daemon restart re-issues `n1` for a DIFFERENT notice (docs/19 obligation 5). Holding
    *  `n1` forever would silently swallow that real one. Within a single board lifetime the
    *  counter only moves forward, so releasing an expired id can never cause a re-send of
-   *  the same notice. */
+   *  the same notice.
+   *
+   *  THE FIRST successful read is different: it SEEDS the guard silently. Everything
+   *  already on the board at that moment predates this process, so it was raised at a peer
+   *  the owner was very likely already told about — by the instance we just replaced.
+   *  Re-sending it would mean every runtime restart re-notifies the owner about mutes he
+   *  has already read, turning OUR deploy into HIS notification (observed live: boris'
+   *  0.27.0 deploy re-sent all five live cards). A notice is one-way and nobody waits on
+   *  it, so the cost of staying quiet is bounded and small: if the peer is still mute the
+   *  daemon raises a FRESH notice once the TTL passes, and if it recovered there was
+   *  nothing to say. Approvals are seeded NEVER — deliberately asymmetric: one carries a
+   *  300 s deadline and a blocked human, so a restart there MUST re-render the card. */
   private async reconcileNotices(): Promise<void> {
     if (!this.notice) return
     let live: FleetNotice[]
@@ -333,6 +348,16 @@ export class FleetFace {
       return
     }
     const ids = new Set(live.map(n => n.id))
+    // Seeding only pre-fills the dedup guard — the send loop below then skips these of its
+    // own accord. Gated on a SUCCESSFUL read, so a failed first reconcile does not burn the
+    // seed and let the retry mistake a pre-existing board for fresh news.
+    if (!this.noticesSeeded) {
+      this.noticesSeeded = true
+      for (const item of live) this.noticed.add(item.id)
+      if (live.length) {
+        this.log('notice.face.seeded', { count: live.length, ids: [...ids].join(',') })
+      }
+    }
     for (const item of live) {
       if (this.noticed.has(item.id)) continue
       this.noticed.add(item.id)

@@ -373,12 +373,82 @@ describe('FleetFace — per-surface gating', () => {
   })
 })
 
-describe('FleetFace.reconcile — notice board', () => {
-  test('sends any live notice missed while disconnected', async () => {
+describe('FleetFace.reconcile — notice board seeding (a restart must not re-notify)', () => {
+  // The defect this pins was observed LIVE: deploying 0.27.0 restarted the runtime, whose
+  // connect-time reconcile re-sent all five live cards to the owner. His deploy became his
+  // notification, about mutes he had read 15 minutes earlier.
+  test('the FIRST successful board read is adopted SILENTLY', async () => {
     const { face, notices } = makeFace({
       'GET /fleet/v1/approvals': { status: 200, body: { approvals: [] } },
       'GET /fleet/v1/notices': { status: 200, body: { notices: [notice('n1'), notice('n2')] } },
     })
+    await face.reconcile()
+    expect(notices).toEqual([]) // predates us — the owner already knows
+    const f = face as unknown as { noticed: Set<string> }
+    expect([...f.noticed].sort()).toEqual(['n1', 'n2']) // …but guarded, so no later re-send
+  })
+
+  test('a notice born AFTER the seed is delivered', async () => {
+    const routes: Record<string, { status: number; body: unknown }> = {
+      'GET /fleet/v1/approvals': { status: 200, body: { approvals: [] } },
+      'GET /fleet/v1/notices': { status: 200, body: { notices: [notice('n1')] } },
+    }
+    const { face, notices } = makeFace(routes)
+    await face.reconcile() // seeds n1 silently
+    expect(notices).toEqual([])
+    routes['GET /fleet/v1/notices'] = { status: 200, body: { notices: [notice('n1'), notice('n2')] } }
+    await face.reconcile()
+    expect(notices.map(n => n.id)).toEqual(['n2']) // only the new one
+  })
+
+  test('a live SSE raise right after the seed is delivered (the seed guards only what it saw)', async () => {
+    const { face, notices } = makeFace({
+      'GET /fleet/v1/approvals': { status: 200, body: { approvals: [] } },
+      'GET /fleet/v1/notices': { status: 200, body: { notices: [notice('n1')] } },
+      'GET /fleet/v1/notices/n2': { status: 200, body: { notice: notice('n2') } },
+    })
+    await face.reconcile()
+    await face.ingest({ src: 'notices', ev: 'notice-raised', id: 'n2' })
+    expect(notices.map(n => n.id)).toEqual(['n2'])
+  })
+
+  // The seed must not be burned by a read that never happened, or the retry would mistake
+  // a pre-existing board for fresh news and re-notify exactly as before the fix.
+  test('a FAILED first read does not burn the seed', async () => {
+    const routes: Record<string, { status: number; body: unknown }> = {
+      'GET /fleet/v1/approvals': { status: 200, body: { approvals: [] } },
+      'GET /fleet/v1/notices': { status: 500, body: { error: 'boom' } },
+    }
+    const { face, notices } = makeFace(routes)
+    await face.reconcile()
+    expect(notices).toEqual([])
+    routes['GET /fleet/v1/notices'] = { status: 200, body: { notices: [notice('n1')] } }
+    await face.reconcile() // THIS is the first successful read → seeds, stays silent
+    expect(notices).toEqual([])
+  })
+
+  // The asymmetry boris and web-runtime settled on: an approval has a 300 s deadline and a
+  // blocked human, so a restart MUST re-render its card. Only notices are seeded.
+  test('approvals are NOT seeded — a restart re-cards the pending queue', async () => {
+    const { face, requests, notices } = makeFace({
+      'GET /fleet/v1/approvals': { status: 200, body: { approvals: [item('a1')] } },
+      'GET /fleet/v1/notices': { status: 200, body: { notices: [notice('n1')] } },
+    })
+    await face.reconcile()
+    expect(requests.map(r => r.id)).toEqual(['a1']) // re-rendered: someone is waiting
+    expect(notices).toEqual([]) // seeded: nobody is waiting
+  })
+})
+
+describe('FleetFace.reconcile — notice board', () => {
+  test('sends a notice missed while disconnected MID-LIFE (after the seed)', async () => {
+    const routes: Record<string, { status: number; body: unknown }> = {
+      'GET /fleet/v1/approvals': { status: 200, body: { approvals: [] } },
+      'GET /fleet/v1/notices': { status: 200, body: { notices: [] } },
+    }
+    const { face, notices } = makeFace(routes)
+    await face.reconcile() // seed against an EMPTY board
+    routes['GET /fleet/v1/notices'] = { status: 200, body: { notices: [notice('n1'), notice('n2')] } }
     await face.reconcile()
     expect(notices.map(n => n.id).sort()).toEqual(['n1', 'n2'])
   })
@@ -390,8 +460,8 @@ describe('FleetFace.reconcile — notice board', () => {
       'GET /fleet/v1/notices': { status: 200, body: { notices: [notice('n1'), notice('n2')] } },
     })
     await face.ingest({ src: 'notices', ev: 'notice-raised', id: 'n1' })
-    await face.reconcile()
-    expect(notices.map(n => n.id)).toEqual(['n1', 'n2']) // n1 once, n2 new
+    await face.reconcile() // first board read → seeds n2, n1 already sent
+    expect(notices.map(n => n.id)).toEqual(['n1'])
   })
 
   // docs/19 obligation 3: the daemon OMITS `notices` entirely when the board is empty.
