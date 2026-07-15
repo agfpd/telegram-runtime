@@ -8,7 +8,7 @@ import {
   parseCallbackData,
   truncateContent,
 } from '../src/approvalCard.ts'
-import type { PendingApproval } from '../src/approvalFleet.ts'
+import type { PendingApproval } from '../src/fleetClient.ts'
 
 function item(over: Partial<PendingApproval> = {}): PendingApproval {
   return {

@@ -22,15 +22,22 @@ import { spawn, spawnSync } from 'child_process'
 import { selfInstall } from './selfInstall.ts'
 import { runSelfConfig } from './selfConfig.ts'
 import {
+  APPROVALS_PATH,
   fleetAvailable,
   listApprovals,
+  listNotices,
+  NOTICES_PATH,
   probeApprovals,
+  probeNotices,
+  probeSurface,
   resolveApproval,
   resolveFleetBase,
   routerJsonPath,
+  type FleetNotice,
   type PendingApproval,
-} from './approvalFleet.ts'
-import { ApprovalFace } from './approvalFace.ts'
+  type SurfaceState,
+} from './fleetClient.ts'
+import { FleetFace } from './fleetFace.ts'
 import {
   buildCardText,
   buildKeyboard,
@@ -38,6 +45,7 @@ import {
   DENY_REASON,
   parseCallbackData,
 } from './approvalCard.ts'
+import { buildNoticeText } from './noticeCard.ts'
 // NAME_RE / RUNTIME / IAPEER_DIR / PEER_PROFILE_FILE are the shared ecosystem
 // contract values — single source of truth in constants.ts (the sibling contract
 // modules import them too). Imported here rather than re-declared so a grammar
@@ -268,6 +276,7 @@ function usage(): string {
   telegram-runtime run
   telegram-runtime doctor [--json]
   telegram-runtime approvals [--json]   # face-side read of the daemon approval queue
+  telegram-runtime notices [--json]     # face-side read of the daemon notice board (mute peers)
   telegram-runtime onboard-approval [--token <token> | --decline [--yes] | --status]`
 }
 
@@ -3260,13 +3269,28 @@ async function syncBotCommands(ctx: RuntimeContext, botKey: string, bot: Bot): P
   }
 }
 
-// ── Human-approval Telegram face (Ф3, docs/17) ──────────────────────────────
-// telegram-runtime is a FACE on the daemon's single approval queue: the approval face
-// (approvalFace.ts) subscribes to the fleet SSE stream and renders a card per pending
-// request; a button tap posts the resolution back to the broker. All decision logic and
-// fail-safety live in the broker/hook — this layer only shows a card and relays a click.
+// ── Owner-facing fleet faces (Ф3, docs/17 + docs/19) ────────────────────────
+// telegram-runtime is a FACE on two daemon surfaces, both carried by ONE fleet SSE
+// subscription (fleetFace.ts):
+//
+//   • APPROVALS (docs/17) — a card per pending request; a button tap posts the resolution
+//     back to the broker. All decision logic and fail-safety live in the broker/hook —
+//     this layer only shows a card and relays a click.
+//   • NOTICES (docs/19) — a message when a peer goes MUTE (an API error left it alive but
+//     unable to answer: exhausted model limit, overload, stale auth). One-way: no buttons.
+//     It reaches the owner "по принципу аппрува" — on HIS surface, routed the same way a
+//     card is, which is the whole point: a faceless Implementer peer has no Telegram
+//     dialog of its own, so without this fan-out its muting is unreportable BY ANYONE
+//     (the muted peer itself is, definitionally, the one that cannot speak). That is
+//     exactly what happened fleet-wide on 15.07.2026 when the fable bucket emptied and
+//     14 peers went silent with every health signal green.
+//
+// The two are gated SEPARATELY (TELEGRAM_APPROVAL / TELEGRAM_NOTICES): silencing cards
+// must never silence mute-reporting, which is a diagnostic channel of last resort.
 const APPROVAL_ENABLED = process.env.TELEGRAM_APPROVAL !== '0'
 const APPROVAL_LOG_ENABLED = process.env.TELEGRAM_APPROVAL_LOG !== '0'
+const NOTICES_ENABLED = process.env.TELEGRAM_NOTICES !== '0'
+const NOTICE_LOG_ENABLED = process.env.TELEGRAM_NOTICE_LOG !== '0'
 /** Credential role value marking the shared approval bot (Ф3 U4). It is a pure
  *  telegram-runtime service-bot — NOT a foundation peer — so faceless approval delivery
  *  never depends on the registry / an intelligence classification (validated with iapeer
@@ -3275,11 +3299,32 @@ const APPROVAL_LOG_ENABLED = process.env.TELEGRAM_APPROVAL_LOG !== '0'
  *  like any credential, resolved to for faceless peers by pickApprovalRoute. */
 const APPROVAL_BOT_ROLE = 'approval'
 
-function logApproval(event: string, fields: Record<string, unknown> = {}): void {
-  if (!APPROVAL_LOG_ENABLED) return
-  const payload: Record<string, unknown> = { ts: new Date().toISOString(), evt: `approval.${event}` }
+/** Structured stderr log for the fleet faces. `evt` is FULLY QUALIFIED and its first
+ *  segment names the surface (`approval.*` | `notice.*` | `fleet.*` for the shared
+ *  connection), which selects both the kill switch and the log's surface word. The face
+ *  emits qualified names directly; the helpers below keep the local call sites terse.
+ *
+ *  `fleet.*` events describe the connection BOTH surfaces ride, so they survive while
+ *  EITHER surface's log is on — silencing approval logs must not blind notice debugging
+ *  to the stream's own connect/error events. */
+function logFleet(evt: string, fields: Record<string, unknown> = {}): void {
+  const surface = evt.split('.')[0]!
+  const enabled =
+    surface === 'notice' ? NOTICE_LOG_ENABLED
+    : surface === 'approval' ? APPROVAL_LOG_ENABLED
+    : NOTICE_LOG_ENABLED || APPROVAL_LOG_ENABLED
+  if (!enabled) return
+  const payload: Record<string, unknown> = { ts: new Date().toISOString(), evt }
   for (const [k, v] of Object.entries(fields)) if (v !== undefined) payload[k] = v
-  process.stderr.write(`telegram-runtime approval ${JSON.stringify(payload)}\n`)
+  process.stderr.write(`telegram-runtime ${surface} ${JSON.stringify(payload)}\n`)
+}
+
+function logApproval(event: string, fields: Record<string, unknown> = {}): void {
+  logFleet(`approval.${event}`, fields)
+}
+
+function logNotice(event: string, fields: Record<string, unknown> = {}): void {
+  logFleet(`notice.${event}`, fields)
 }
 
 type ApprovalCardEntry = { chatId: string; botKey: string; messageId: number; item: PendingApproval }
@@ -3305,7 +3350,15 @@ export function pickApprovalRoute(
   return null
 }
 
-/** Bind the pure route to this runtime's live bots + owner dialog. */
+/** Bind the pure route to this runtime's live bots + owner dialog.
+ *
+ *  SHARED BY BOTH SURFACES: a notice (docs/19) takes the identical route to a card, which
+ *  is precisely what "уведомлять по принципу аппрува" means — the owner hears about a peer
+ *  wherever he already talks to (or about) that peer, and a peer with no face of its own
+ *  still reaches him via the shared service-bot. The `approval` naming here is HISTORY
+ *  (approvals came first) and stops at the wire: `role=approval` is a provisioned
+ *  credential value on a live host, so renaming it would be a breaking change to
+ *  provisioning for zero behavioural gain. Read it as "the owner's service bot". */
 function resolveApprovalRoute(
   ctx: RuntimeContext,
   personality: string,
@@ -3321,26 +3374,70 @@ function resolveApprovalRoute(
   return { bot: ctx.bots.get(route.botKey)!, botKey: route.botKey, kind: route.kind, chatId: ctx.ownerUserId }
 }
 
-/** Start the approval face when the daemon advertises the fleet/approval surface. Returns
- *  the running face (for cleanup) or null (approval off / pre-approval daemon). The card
- *  registry is closed over here — its `onResolved` edit is the SINGLE authoritative card
- *  edit, so a resolution from ANY channel (button, CLI, tray, timeout) converges on it. */
-function startApprovalFace(ctx: RuntimeContext): ApprovalFace | null {
-  if (!APPROVAL_ENABLED) {
-    logApproval('face.off', { reason: 'TELEGRAM_APPROVAL=0' })
-    return null
-  }
+/** Start the fleet face when the daemon advertises the fleet surface AND at least one of
+ *  our two surfaces is both enabled and actually served. Returns the running face (for
+ *  cleanup) or null (everything off / pre-fleet daemon).
+ *
+ *  Each surface is probed LIVE, not just feature-flagged: `fleet:1` in router.json only
+ *  says the Fleet API exists, and a daemon older than 0.4.94 serves approvals while 404ing
+ *  notices. Probing keeps such a daemon from spraying a 404 through every reconcile.
+ *
+ *  A probe disables a surface ONLY on a definitive answer (`absent`). An `unreachable`
+ *  daemon leaves the surface ON: router.json outlives a non-graceful daemon exit, so a
+ *  runtime that boots before the daemon listens sees `fleet:1` + a refused connection —
+ *  and treating that as "not served" would kill approvals AND notices for the whole
+ *  process lifetime. The face's reconnect loop is what heals that, so let it.
+ *
+ *  This runs on the STARTUP path, ahead of Telegram polling, so the probes go out
+ *  concurrently under a short deadline: a wedged daemon must cost the owner's bridge a
+ *  couple of seconds, not two full FLEET_CALL_TIMEOUT_MS in series.
+ *
+ *  The card registry is closed over here — its `onResolved` edit is the SINGLE
+ *  authoritative card edit, so a resolution from ANY channel (button, CLI, tray, timeout)
+ *  converges on it. Notices have no such registry: they are never edited. */
+const FACE_PROBE_TIMEOUT_MS = 2_000
+
+async function startFleetFace(ctx: RuntimeContext): Promise<FleetFace | null> {
   if (!fleetAvailable()) {
-    logApproval('face.off', { reason: 'no fleet in router.json (pre-approval daemon)' })
+    logFleet('fleet.face.off', { reason: 'no fleet in router.json (pre-fleet daemon)' })
     return null
   }
   const base = resolveFleetBase()
   ctx.approvalBase = base
+
+  let approvalOn = APPROVAL_ENABLED
+  let noticesOn = NOTICES_ENABLED
+  if (!approvalOn) logApproval('face.off', { reason: 'TELEGRAM_APPROVAL=0' })
+  if (!noticesOn) logNotice('face.off', { reason: 'TELEGRAM_NOTICES=0' })
+
+  const probe = (path: string, on: boolean): Promise<SurfaceState | null> =>
+    on ? probeSurface(base, path, { timeoutMs: FACE_PROBE_TIMEOUT_MS }) : Promise.resolve(null)
+  const [approvalState, noticeState] = await Promise.all([
+    probe(APPROVALS_PATH, approvalOn),
+    probe(NOTICES_PATH, noticesOn),
+  ])
+
+  if (approvalState === 'absent') {
+    approvalOn = false
+    logApproval('face.off', { reason: `GET ${base}${APPROVALS_PATH} not 200 (pre-approval daemon)` })
+  }
+  if (noticeState === 'absent') {
+    noticesOn = false
+    logNotice('face.off', { reason: `GET ${base}${NOTICES_PATH} not 200 (daemon < 0.4.94)` })
+  }
+  if (approvalState === 'unreachable' || noticeState === 'unreachable') {
+    // Deliberately NOT a reason to disable — see the doc comment above.
+    logFleet('fleet.face.probe.unreachable', { base, note: 'daemon not listening yet; the face loop will retry' })
+  }
+
+  if (!approvalOn && !noticesOn) return null
+
   const cards = new Map<string, ApprovalCardEntry>()
-  const face = new ApprovalFace({
+  const face = new FleetFace({
     base,
-    log: (evt, f) => logApproval(evt.replace(/^approval\./, ''), f),
-    handlers: {
+    log: logFleet,
+    notice: noticesOn ? { onNotice: item => sendNotice(ctx, item) } : undefined,
+    approval: !approvalOn ? undefined : {
       onRequest: async item => {
         const route = resolveApprovalRoute(ctx, item.personality)
         if (!route) {
@@ -3382,8 +3479,53 @@ function startApprovalFace(ctx: RuntimeContext): ApprovalFace | null {
     },
   })
   face.start()
-  logApproval('face.on', { base, approvalBot: ctx.approvalBotKey ?? '(none — faceless→bar/CLI)' })
+  logFleet('fleet.face.on', {
+    base,
+    approval: approvalOn,
+    notices: noticesOn,
+    approvalBot: ctx.approvalBotKey ?? '(none — faceless→bar/CLI)',
+  })
   return face
+}
+
+/** Send ONE peer-mute notice to the owner (docs/19). Deliberately thin: render, send, log.
+ *  No card registry (nothing ever edits it), no buttons (nothing to decide), no retry
+ *  beyond the send itself — a notice the owner missed is re-raised by the daemon after its
+ *  TTL, which is a better reminder than anything this layer could invent.
+ *
+ *  A `noroute` here is the one case where the owner still learns nothing, so it is logged
+ *  loudly: it means neither the muted peer nor a shared service-bot can reach him, and the
+ *  fix is provisioning (`onboard-approval`), not code. */
+async function sendNotice(ctx: RuntimeContext, item: FleetNotice): Promise<void> {
+  const route = resolveApprovalRoute(ctx, item.personality)
+  if (!route) {
+    logNotice('noroute', {
+      id: item.id,
+      personality: item.personality,
+      hint: 'no own bot and no role=approval service bot — run `telegram-runtime onboard-approval`',
+    })
+    return
+  }
+  try {
+    const sent = await route.bot.api.sendMessage(route.chatId, buildNoticeText(item), { parse_mode: 'HTML' })
+    logNotice('sent', {
+      id: item.id,
+      personality: item.personality,
+      runtime: item.runtime,
+      kind: item.kind,
+      errorType: item.errorType,
+      model: item.model,
+      // Logged as an explicit null (not omitted) so the audit trail proves we KNEW the
+      // runtime stated no reset, rather than leaving it ambiguous whether we simply lost it.
+      resetsAtMs: item.resetsAtMs ?? null,
+      count: item.count,
+      route: route.kind,
+      botKey: route.botKey,
+      messageId: sent.message_id,
+    })
+  } catch (err) {
+    logNotice('send.error', { id: item.id, personality: item.personality, reason: formatError(err) })
+  }
 }
 
 /** Handle a tap on an approval card button. Owner-gated (only the owner may resolve — the
@@ -4073,10 +4215,10 @@ async function runCommand(): Promise<void> {
   const bots = new Map<string, Bot>()
   const releaseLocks: ReleaseLock[] = []
   let commandsSyncTimer: ReturnType<typeof setInterval> | undefined
-  let approvalFace: ApprovalFace | null = null
+  let fleetFace: FleetFace | null = null
   const cleanup = () => {
     if (commandsSyncTimer) clearInterval(commandsSyncTimer)
-    approvalFace?.stop()
+    fleetFace?.stop()
     for (const release of releaseLocks.splice(0).reverse()) release()
   }
   process.once('exit', cleanup)
@@ -4112,10 +4254,11 @@ async function runCommand(): Promise<void> {
     installBotHandlers(ctx, botKey, bot, credentials.get(botKey)!)
   }
   installStdinEnvelopeReader(ctx)
-  // Human-approval Telegram face (Ф3): subscribe to the daemon approval broker and render
-  // cards. No-op when the daemon is pre-approval (no fleet) or TELEGRAM_APPROVAL=0 — the
-  // runtime then behaves byte-identically to before this feature.
-  approvalFace = startApprovalFace(ctx)
+  // Owner-facing fleet faces (Ф3): ONE SSE subscription serving approval cards (docs/17)
+  // and peer-mute notices (docs/19). No-op per surface when the daemon does not serve it
+  // or its kill switch is set — the runtime then behaves byte-identically to before the
+  // feature. Awaited: each surface is live-probed before its handlers are wired.
+  fleetFace = await startFleetFace(ctx)
   process.stderr.write(
     `telegram-runtime: running ${RUNTIME}-${owner.personality}; bots=${Array.from(bots.keys()).join(', ')}\n`,
   )
@@ -4166,6 +4309,52 @@ async function selfConfigCommand(): Promise<void> {
   process.stderr.write(
     `telegram-runtime ${JSON.stringify({ ts: new Date().toISOString(), evt: 'self-config', personality: r.personality, userId: r.userId, bot_username: r.botUsername, profile: r.profilePath })}\n`,
   )
+}
+
+// `telegram-runtime notices [--json]`: a FACE-side read of the daemon's notice board
+// (docs/19) — the operator's answer to "did my peer go mute, and does telegram-runtime
+// agree with the daemon about it?". Read-only BY CONTRACT, not by choice: the surface has
+// no POST and a notice has no resolution.
+//
+// It renders the same honest omission the Telegram message does: a missing reset prints
+// "неизвестно (рантайм не сообщил)" and NEVER a substituted 5h/7d window.
+async function noticesCommand(args: string[]): Promise<void> {
+  const { flags } = parseFlags(args)
+  const asJson = Boolean(flags.json)
+  if (!fleetAvailable()) {
+    const msg = `no fleet API advertised in ${routerJsonPath()} (pre-fleet daemon or daemon down)`
+    if (asJson) printJson({ fleet: false, base: null, notices: [], note: msg })
+    else process.stdout.write(`${msg}\n`)
+    return
+  }
+  const base = resolveFleetBase()
+  if (!(await probeNotices(base))) {
+    const msg = `fleet advertised but GET ${base}/fleet/v1/notices did not return 200 (daemon < 0.4.94?)`
+    if (asJson) printJson({ fleet: true, base, reachable: false, notices: [], note: msg })
+    else process.stdout.write(`${msg}\n`)
+    return
+  }
+  const notices = await listNotices(base)
+  if (asJson) {
+    printJson({ fleet: true, base, reachable: true, notices })
+    return
+  }
+  if (notices.length === 0) {
+    process.stdout.write(`no live notices (${base})\n`)
+    return
+  }
+  for (const n of notices) {
+    const reset =
+      n.resetsAtMs === undefined
+        ? 'reset unknown (runtime did not state it)'
+        : `reset ${new Date(n.resetsAtMs).toISOString()}`
+    const model = n.model ?? '(model unstated)'
+    const repeat = n.count > 1 ? ` ×${n.count}` : ''
+    process.stdout.write(
+      `${n.id}  ${n.personality} · ${n.runtime} · ${n.kind} · ${n.errorType} · ${model}${repeat}  (${reset})\n` +
+        `${n.content.split('\n')[0] ?? ''}\n`,
+    )
+  }
 }
 
 // `telegram-runtime approvals [--json]`: a FACE-side read of the daemon's human-approval
@@ -4355,6 +4544,9 @@ async function main(): Promise<void> {
       return
     case 'approvals':
       await approvalsCommand(rest)
+      return
+    case 'notices':
+      await noticesCommand(rest)
       return
     case 'onboard-approval':
       await onboardApprovalCommand(rest)

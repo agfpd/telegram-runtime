@@ -37,6 +37,17 @@ All three are on by default; set the variable to `0` to turn one off:
 | `TELEGRAM_ACTIVITY_DEFAULT` | on | the activity default for a peer that hasn't set it |
 | `TELEGRAM_RICH` | on | rich-formatted messages (server-side markdown) |
 
+## Owner-facing daemon surfaces
+
+Both are on by default and gated separately on purpose: silencing approval cards must not silence mute reporting, which is a channel of last resort — the peer that would report itself is the one that cannot speak.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `TELEGRAM_APPROVAL` | on | approval cards ([04 — Features](04-features.md#human-approval)) |
+| `TELEGRAM_NOTICES` | on | peer-mute notices ([04 — Features](04-features.md#mute-peer-notices)) |
+| `TELEGRAM_APPROVAL_LOG` | on | structured approval + connection events on stderr |
+| `TELEGRAM_NOTICE_LOG` | on | structured notice events on stderr |
+
 ## Proxy
 
 If Telegram's API needs a proxy, the bridge honors the first of these that is set:

@@ -10,6 +10,56 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-07-15
+
+### Added
+
+- **Peer-mute notices reach the owner in Telegram** (iapeer docs/19, daemon
+  ≥ 0.4.94). An API error — an exhausted model limit, an overload, an expired
+  auth — leaves a peer alive, green by every daemon health signal, and unable to
+  say a word; nobody inside that session can report it. The daemon now raises a
+  `peer-mute` notice and this runtime fans it out to the owner: **who / which
+  runtime / which error type / which model / when the wall lifts**.
+  - Routed exactly like an approval card, which is the point: a **faceless**
+    Implementer has no Telegram dialog of its own, so its muting was reportable
+    by nobody. Faced peer → its own bot; faceless → the shared `role=approval`
+    service bot.
+  - **No buttons.** A notice is one-way information (docs/19 §1): nothing to
+    decide, nothing to resolve, no card edit, no lifecycle.
+  - **Absent fields are rendered as unstated, never guessed.** claude states no
+    reset for a per-model bucket, so the message says *"время сброса
+    неизвестно — рантайм его не сообщил"*. The 5h/7d reset in the statusline
+    belongs to a DIFFERENT limit and is never substituted (measured live
+    15.07.2026: 5h at 11 %, 7d at 66 % while fable was fully exhausted). Same
+    for an unstated `model` (always so on codex).
+  - `kind` and `errorType` are growth seams: rendered verbatim, never switched
+    on exhaustively, so an unknown value still reaches the owner.
+  - Repeats do not spam: the daemon folds re-occurrences into one notice with a
+    count, rendered `×N`. The face never counts for itself.
+  - New `notices [--json]` command — the face-side read of the board, agreeing
+    with the daemon. Read-only by contract.
+  - Kill switch `TELEGRAM_NOTICES=0`, gated INDEPENDENTLY of `TELEGRAM_APPROVAL`:
+    silencing cards must never silence mute reporting. Log switch
+    `TELEGRAM_NOTICE_LOG=0`.
+  - Inert against a daemon that does not serve the board: `fleet:1` only says the
+    Fleet API exists, so each surface is additionally live-probed at start
+    (a pre-0.4.94 daemon serves approvals and 404s notices).
+
+### Changed
+
+- `approvalFleet.ts` → **`fleetClient.ts`**, `approvalFace.ts` → **`fleetFace.ts`**
+  (`ApprovalFace` → `FleetFace`), via `git mv` so history follows. Both modules
+  were always the generic fleet HTTP client and the generic fleet SSE loop —
+  approvals were merely their first surface. Notices ride the SAME connection and
+  transport rather than a second near-copy of the reconnect/backoff/parse loop,
+  which is how a divergent copy starts (the lesson the IAP parser already taught
+  this repo). Handlers are now per-surface (`approval` / `notice`), either
+  optional. Internal module names; no packaged contract changed.
+- The shared-connection log events are renamed `approval.face.{start,stop,
+  connected,stream.error}` → **`fleet.face.*`** (they describe one connection
+  serving two surfaces, not the approval surface). Surface-specific events keep
+  their `approval.*` prefix and notices use `notice.*`.
+
 ## [0.26.0] - 2026-07-14
 
 ### Fixed

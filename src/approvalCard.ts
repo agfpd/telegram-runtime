@@ -4,7 +4,8 @@
 // the grammy run-loop wires it (cli.ts) but the formatting/escaping and the 64-byte
 // callback_data contract are unit-tested here in isolation.
 
-import type { PendingApproval } from './approvalFleet.ts'
+import type { PendingApproval } from './fleetClient.ts'
+import { escHtml } from './html.ts'
 
 /** callback_data schema: `apv:<id>:<a|d>`. Only id + action travel (the 64-byte Telegram
  *  limit); the full action content lives in the message + the broker queue. */
@@ -30,10 +31,6 @@ export function parseCallbackData(data: string | undefined): { id: string; actio
 /** Max chars of `content` embedded in the card. Telegram's message cap is 4096; the HTML
  *  wrapper + header take a slice, so the content body is bounded well under it. */
 export const CARD_CONTENT_MAX = 3500
-
-function escHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
 
 /** Truncate long content (a big diff / a Write body) with an explicit marker pointing at
  *  the CLI where the full text is always available. */

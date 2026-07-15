@@ -23,6 +23,7 @@ When a peer runs in `gated` mode (iapeer's `approval-mode`), its blocking approv
 | Command | What it does |
 |---|---|
 | `approvals [--json]` | Face-side read of the daemon's pending approval queue (agrees with `iapeer approvals`). Read-only. |
+| `notices [--json]` | Face-side read of the daemon's notice board — the peers currently muted by an API error. Read-only by contract: a notice has no resolution. See [04 — Features](04-features.md#mute-peer-notices). |
 | `onboard-approval` | Show the offer for the shared approval bot (the single Telegram channel for **faceless** peers — those without their own bot). |
 | `onboard-approval --token <token>` | Provision the approval bot from a `@BotFather` token: stores the credential with `role=approval`; faceless peers' cards are delivered there once the bridge restarts. |
 | `onboard-approval --decline` / `--decline --yes` | Decline the approval bot. The two touches are a double warning: without it, faceless peers' approvals reach only the host bar (`iapeer approvals`) and CLI, never Telegram. Faced peers are unaffected. |

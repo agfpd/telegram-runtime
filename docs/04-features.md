@@ -51,3 +51,15 @@ A peer can run in `gated` mode (iapeer's `approval-mode`): instead of acting aut
 Each pending request arrives as a **card** showing the exact action content (the full command, the diff, the plan text) with **Allow** and **Deny** buttons. Only the owner can resolve it. A tap posts the decision back to the broker: Allow lets the tool proceed, Deny blocks it with a reason delivered to the model. The card is then edited in place to show the outcome — and because the broker is one shared queue, a resolution from any channel (the button, `iapeer approve` on the CLI, the tray) resolves the request everywhere.
 
 A **faced** peer (one with its own bot) gets its card in its own dialog with the owner. **Faceless** peers (Implementers, infra — no bot of their own) share one approval bot, provisioned with `onboard-approval`; if the owner declines it, their approvals surface only on the host bar and CLI. The whole feature is inert unless the daemon advertises the approval broker; a peer left in the default `yolo` mode behaves exactly as before.
+
+## Mute-peer notices
+
+A peer can fail in a way that leaves it alive, healthy by every signal the daemon has, and unable to say a word: an API error — an exhausted model limit, an overload, an expired auth — eats the turn and the session goes right on breathing. Nobody inside that session can report it; that is precisely what broke. The owner writes and gets silence.
+
+So the daemon reports it, and the bridge carries it to Telegram. When the daemon's notice board raises a **peer-mute** notice, the owner gets a message naming **who** went mute, **which runtime**, the **error type** the runtime itself reported, the **model** where one was named, and **when the wall lifts**. It is routed exactly like an approval card — a faced peer's notice arrives in that peer's dialog, a faceless peer's on the shared approval bot — which is the point: an Implementer has no dialog of its own, so without this its muting is reportable by no one.
+
+Unlike a card, a notice has **no buttons**. It is information, not a request: there is nothing to decide and nothing to resolve. Repeats do not spam — the daemon folds every re-occurrence into one notice with a `×N` count, and the bridge renders that count rather than counting for itself.
+
+**When the runtime states no reset time, the message says so plainly** rather than guessing. Claude, for one, never says when a per-model bucket lifts — and the 5h/7d reset shown in the statusline belongs to a *different* limit, so substituting it would be a confident lie. An absent field always means "the runtime did not say", never "there is no limit".
+
+The feature is inert against a daemon that does not serve the notice board, and can be switched off with `TELEGRAM_NOTICES=0` — independently of approvals, since silencing cards must never silence mute reporting.
