@@ -54,7 +54,11 @@ function notice(id: string, over: Partial<FleetNotice> = {}): FleetNotice {
   }
 }
 
-/** A face with BOTH surfaces wired (the production shape). */
+/** A face with BOTH surfaces wired (the production shape).
+ *
+ *  `startedMs: 0` puts this face's birth before every fixture's `createdMs`, so its notices
+ *  are all NEWS. These suites are about routing/dedup/gating; the history watershed
+ *  (docs/19 obligation 6) is exercised in its own describe with explicit timestamps. */
 function makeFace(routes: Record<string, { status: number; body: unknown }>): {
   face: FleetFace
   requests: PendingApproval[]
@@ -70,6 +74,7 @@ function makeFace(routes: Record<string, { status: number; body: unknown }>): {
     base: 'http://x',
     deps: { fetch, env: {} },
     reconcileIntervalMs: 0,
+    startedMs: 0,
     approval: {
       onRequest: it => {
         requests.push(it)
@@ -99,6 +104,7 @@ function makeGatedFace(
     base: 'http://x',
     deps: { fetch, env: {} },
     reconcileIntervalMs: 0,
+    startedMs: 0, // every fixture notice is NEWS here — see makeFace
     approval: surfaces.approval
       ? {
           onRequest: it => {
@@ -373,70 +379,125 @@ describe('FleetFace — per-surface gating', () => {
   })
 })
 
-describe('FleetFace.reconcile — notice board seeding (a restart must not re-notify)', () => {
+// docs/19 obligation 6: "Deliver only notices raised WHILE YOU WERE RUNNING — i.e. whose
+// createdMs is later than your own start." The watershed is our start time, NOT what
+// happened to be on the board when we first managed to read it.
+describe('FleetFace — notice seeding (docs/19 obligation 6: a restart is not news)', () => {
+  const START = 1_000_000
+  const before = (id: string) => notice(id, { createdMs: START - 60_000 }) // raised before us
+  const after = (id: string) => notice(id, { createdMs: START + 60_000 }) // raised while we ran
+
+  function seedFace(routes: Record<string, { status: number; body: unknown }>) {
+    const { fetch, calls } = routedFetch(routes)
+    const notices: FleetNotice[] = []
+    const requests: PendingApproval[] = []
+    const face = new FleetFace({
+      base: 'http://x',
+      deps: { fetch, env: {} },
+      reconcileIntervalMs: 0,
+      startedMs: START,
+      approval: {
+        onRequest: it => {
+          requests.push(it)
+        },
+        onResolved: () => {},
+      },
+      notice: {
+        onNotice: it => {
+          notices.push(it)
+        },
+      },
+    })
+    return { face, notices, requests, calls }
+  }
+
   // The defect this pins was observed LIVE: deploying 0.27.0 restarted the runtime, whose
-  // connect-time reconcile re-sent all five live cards to the owner. His deploy became his
-  // notification, about mutes he had read 15 minutes earlier.
-  test('the FIRST successful board read is adopted SILENTLY', async () => {
-    const { face, notices } = makeFace({
+  // connect-time reconcile re-sent all five live cards. The deploy became the notification.
+  test('notices raised BEFORE our start are adopted silently but guarded', async () => {
+    const { face, notices } = seedFace({
       'GET /fleet/v1/approvals': { status: 200, body: { approvals: [] } },
-      'GET /fleet/v1/notices': { status: 200, body: { notices: [notice('n1'), notice('n2')] } },
+      'GET /fleet/v1/notices': { status: 200, body: { notices: [before('n1'), before('n2')] } },
     })
     await face.reconcile()
-    expect(notices).toEqual([]) // predates us — the owner already knows
+    expect(notices).toEqual([]) // the owner already read these
     const f = face as unknown as { noticed: Set<string> }
-    expect([...f.noticed].sort()).toEqual(['n1', 'n2']) // …but guarded, so no later re-send
+    expect([...f.noticed].sort()).toEqual(['n1', 'n2']) // guarded → no later re-send
   })
 
-  test('a notice born AFTER the seed is delivered', async () => {
+  test('notices raised AFTER our start are delivered, even on the very first read', async () => {
+    const { face, notices } = seedFace({
+      'GET /fleet/v1/approvals': { status: 200, body: { approvals: [] } },
+      'GET /fleet/v1/notices': { status: 200, body: { notices: [before('n1'), after('n2')] } },
+    })
+    await face.reconcile()
+    expect(notices.map(n => n.id)).toEqual(['n2']) // history stays quiet, news gets through
+  })
+
+  // THE divergence that keying on "first read" instead of createdMs would cause. When the
+  // daemon is not up at boot the face backs off for seconds or minutes; a mute raised in
+  // that window is news the owner must get, but a first-read seed would bury it as history.
+  test('a notice raised after our start but BEFORE the first successful read is still delivered', async () => {
     const routes: Record<string, { status: number; body: unknown }> = {
       'GET /fleet/v1/approvals': { status: 200, body: { approvals: [] } },
-      'GET /fleet/v1/notices': { status: 200, body: { notices: [notice('n1')] } },
+      'GET /fleet/v1/notices': { status: 500, body: { error: 'daemon not up yet' } },
     }
-    const { face, notices } = makeFace(routes)
-    await face.reconcile() // seeds n1 silently
+    const { face, notices } = seedFace(routes)
+    await face.reconcile() // first read FAILS — the daemon is still coming up
     expect(notices).toEqual([])
-    routes['GET /fleet/v1/notices'] = { status: 200, body: { notices: [notice('n1'), notice('n2')] } }
+    // …the daemon comes up; the board already holds a mute raised during our backoff.
+    routes['GET /fleet/v1/notices'] = { status: 200, body: { notices: [before('n1'), after('n2')] } }
     await face.reconcile()
-    expect(notices.map(n => n.id)).toEqual(['n2']) // only the new one
+    expect(notices.map(n => n.id)).toEqual(['n2'])
   })
 
-  test('a live SSE raise right after the seed is delivered (the seed guards only what it saw)', async () => {
-    const { face, notices } = makeFace({
+  test('a live SSE raise is delivered', async () => {
+    const { face, notices } = seedFace({
       'GET /fleet/v1/approvals': { status: 200, body: { approvals: [] } },
-      'GET /fleet/v1/notices': { status: 200, body: { notices: [notice('n1')] } },
-      'GET /fleet/v1/notices/n2': { status: 200, body: { notice: notice('n2') } },
+      'GET /fleet/v1/notices': { status: 200, body: { notices: [before('n1')] } },
+      'GET /fleet/v1/notices/n2': { status: 200, body: { notice: after('n2') } },
     })
     await face.reconcile()
     await face.ingest({ src: 'notices', ev: 'notice-raised', id: 'n2' })
     expect(notices.map(n => n.id)).toEqual(['n2'])
   })
 
-  // The seed must not be burned by a read that never happened, or the retry would mistake
-  // a pre-existing board for fresh news and re-notify exactly as before the fix.
-  test('a FAILED first read does not burn the seed', async () => {
-    const routes: Record<string, { status: number; body: unknown }> = {
+  // Both paths honour ONE rule, so no future replay/backfill can sneak history in.
+  test('an SSE raise for a notice that predates us is NOT delivered', async () => {
+    const { face, notices } = seedFace({
       'GET /fleet/v1/approvals': { status: 200, body: { approvals: [] } },
-      'GET /fleet/v1/notices': { status: 500, body: { error: 'boom' } },
-    }
-    const { face, notices } = makeFace(routes)
-    await face.reconcile()
-    expect(notices).toEqual([])
-    routes['GET /fleet/v1/notices'] = { status: 200, body: { notices: [notice('n1')] } }
-    await face.reconcile() // THIS is the first successful read → seeds, stays silent
+      'GET /fleet/v1/notices/n1': { status: 200, body: { notice: before('n1') } },
+    })
+    await face.ingest({ src: 'notices', ev: 'notice-raised', id: 'n1' })
     expect(notices).toEqual([])
   })
 
-  // The asymmetry boris and web-runtime settled on: an approval has a 300 s deadline and a
-  // blocked human, so a restart MUST re-render its card. Only notices are seeded.
+  // docs/19: "The discriminator is not which surface you are, it is whether anything is
+  // BLOCKED WAITING ON A HUMAN." An approval holds a tool call against a ≤300 s
+  // default-deny, so a face that starts up quiet lets it time out into a denial.
   test('approvals are NOT seeded — a restart re-cards the pending queue', async () => {
-    const { face, requests, notices } = makeFace({
+    const { face, requests, notices } = seedFace({
       'GET /fleet/v1/approvals': { status: 200, body: { approvals: [item('a1')] } },
-      'GET /fleet/v1/notices': { status: 200, body: { notices: [notice('n1')] } },
+      'GET /fleet/v1/notices': { status: 200, body: { notices: [before('n1')] } },
     })
     await face.reconcile()
-    expect(requests.map(r => r.id)).toEqual(['a1']) // re-rendered: someone is waiting
-    expect(notices).toEqual([]) // seeded: nobody is waiting
+    expect(requests.map(r => r.id)).toEqual(['a1']) // someone is blocked → re-render
+    expect(notices).toEqual([]) // nobody is blocked → stay quiet
+  })
+
+  // §5: a still-broken peer re-raises after the TTL with a NEWER createdMs, so the loss is
+  // a delay of one TTL rather than permanent — the property that makes obligation 6 safe.
+  test('a TTL re-raise after our start is delivered (the cost is a delay, not a loss)', async () => {
+    const routes: Record<string, { status: number; body: unknown }> = {
+      'GET /fleet/v1/approvals': { status: 200, body: { approvals: [] } },
+      'GET /fleet/v1/notices': { status: 200, body: { notices: [before('n1')] } },
+    }
+    const { face, notices } = seedFace(routes)
+    await face.reconcile() // n1 is history → silent
+    expect(notices).toEqual([])
+    // n1's TTL passes; the peer is still mute, so the board re-raises it fresh as n7.
+    routes['GET /fleet/v1/notices'] = { status: 200, body: { notices: [after('n7')] } }
+    await face.reconcile()
+    expect(notices.map(n => n.id)).toEqual(['n7'])
   })
 })
 
@@ -460,8 +521,8 @@ describe('FleetFace.reconcile — notice board', () => {
       'GET /fleet/v1/notices': { status: 200, body: { notices: [notice('n1'), notice('n2')] } },
     })
     await face.ingest({ src: 'notices', ev: 'notice-raised', id: 'n1' })
-    await face.reconcile() // first board read → seeds n2, n1 already sent
-    expect(notices.map(n => n.id)).toEqual(['n1'])
+    await face.reconcile()
+    expect(notices.map(n => n.id)).toEqual(['n1', 'n2']) // n1 exactly once, n2 new
   })
 
   // docs/19 obligation 3: the daemon OMITS `notices` entirely when the board is empty.

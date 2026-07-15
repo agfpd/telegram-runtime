@@ -152,6 +152,9 @@ export interface FleetFaceOptions {
   reconcileIntervalMs?: number
   /** Injectable sleep (tests). */
   sleep?: (ms: number) => Promise<void>
+  /** This face's start time — the watershed between history and news for notices
+   *  (docs/19 obligation 6). Defaults to now; injected by tests. */
+  startedMs?: number
 }
 
 const DEFAULT_BACKOFF = [1000, 2000, 5000, 10_000, 15_000]
@@ -178,9 +181,8 @@ export class FleetFace {
    *  id leaves the board, which is what keeps docs/19 obligation 5 (ids are NOT stable
    *  across a daemon restart) from silently swallowing a re-issued `n1`. */
   private readonly noticed = new Set<string>()
-  /** Whether the board has ever been read successfully. Gates the one-time silent seed —
-   *  see reconcileNotices for why a restart must not re-notify. */
-  private noticesSeeded = false
+  /** This face's own start, the history/news watershed for docs/19 obligation 6. */
+  private readonly startedMs: number
   private controller: AbortController | null = null
   private reconcileTimer: ReturnType<typeof setInterval> | null = null
   private running = false
@@ -194,6 +196,24 @@ export class FleetFace {
     this.backoff = opts.backoffMs ?? DEFAULT_BACKOFF
     this.reconcileIntervalMs = opts.reconcileIntervalMs ?? 60_000
     this.sleep = opts.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)))
+    this.startedMs = opts.startedMs ?? Date.now()
+  }
+
+  /** docs/19 obligation 6: a notice raised at or before this face came up is HISTORY —
+   *  the instance we replaced already told the owner about it, and re-announcing it makes
+   *  OUR restart into HIS notification. Anything raised after our start is news.
+   *
+   *  Keyed on the notice's own `createdMs` against our start — the mechanism the contract
+   *  prescribes — NOT on "whatever was on the board when I first managed to read it". The
+   *  two agree only when that first read is instant. They diverge exactly where it hurts:
+   *  if the daemon is not up yet at boot, the face backs off for seconds or minutes, and a
+   *  mute raised inside that window IS news the owner must get, yet a first-read seed would
+   *  bury it as history. Comparing timestamps is also stateless — no seed flag, no "don't
+   *  burn the seed on a failed read" subtlety, and correct across a daemon restart (a
+   *  restarted board re-detects and stamps a NEWER createdMs, so live conditions are
+   *  delivered rather than suppressed). */
+  private isHistory(item: FleetNotice): boolean {
+    return item.createdMs <= this.startedMs
   }
 
   /** Route ONE parsed event `data` object to the right surface's handlers, with dedup.
@@ -279,6 +299,13 @@ export class FleetFace {
       this.log('notice.face.notice.gone', { id }) // 404 — TTL passed
       return
     }
+    // The same history watershed as reconcile. A live event (replay=0) is news by
+    // construction, so this should never fire here — it is applied anyway so ONE rule
+    // decides delivery on BOTH paths and no future replay/backfill can sneak history in.
+    if (this.isHistory(item)) {
+      this.log('notice.face.seeded', { count: 1, ids: item.id })
+      return
+    }
     await Promise.resolve(this.notice.onNotice(item)).catch(err => {
       this.log('notice.face.onNotice.error', { id, err: String(err) })
     })
@@ -328,16 +355,17 @@ export class FleetFace {
    *  counter only moves forward, so releasing an expired id can never cause a re-send of
    *  the same notice.
    *
-   *  THE FIRST successful read is different: it SEEDS the guard silently. Everything
-   *  already on the board at that moment predates this process, so it was raised at a peer
-   *  the owner was very likely already told about — by the instance we just replaced.
-   *  Re-sending it would mean every runtime restart re-notifies the owner about mutes he
-   *  has already read, turning OUR deploy into HIS notification (observed live: boris'
-   *  0.27.0 deploy re-sent all five live cards). A notice is one-way and nobody waits on
-   *  it, so the cost of staying quiet is bounded and small: if the peer is still mute the
-   *  daemon raises a FRESH notice once the TTL passes, and if it recovered there was
-   *  nothing to say. Approvals are seeded NEVER — deliberately asymmetric: one carries a
-   *  300 s deadline and a blocked human, so a restart there MUST re-render the card. */
+   *  Anything raised at or before our own start is SEEDED silently (isHistory, docs/19
+   *  obligation 6): the instance we replaced already told the owner, so re-announcing it
+   *  turns OUR restart into HIS notification (observed live — the 0.27.0 deploy re-sent all
+   *  five live cards). Seeding only pre-fills the dedup guard; the send loop then skips
+   *  those of its own accord, so there is no special case on the delivery path.
+   *
+   *  Approvals are seeded NEVER — deliberately asymmetric. Per docs/19 the discriminator is
+   *  not which surface you are but WHETHER ANYTHING IS BLOCKED WAITING ON A HUMAN: a notice
+   *  blocks nothing, while an approval holds a peer's tool call against a ≤300 s
+   *  default-deny, so a face that starts up and stays quiet about it lets the request time
+   *  out into a denial. */
   private async reconcileNotices(): Promise<void> {
     if (!this.notice) return
     let live: FleetNotice[]
@@ -348,23 +376,19 @@ export class FleetFace {
       return
     }
     const ids = new Set(live.map(n => n.id))
-    // Seeding only pre-fills the dedup guard — the send loop below then skips these of its
-    // own accord. Gated on a SUCCESSFUL read, so a failed first reconcile does not burn the
-    // seed and let the retry mistake a pre-existing board for fresh news.
-    if (!this.noticesSeeded) {
-      this.noticesSeeded = true
-      for (const item of live) this.noticed.add(item.id)
-      if (live.length) {
-        this.log('notice.face.seeded', { count: live.length, ids: [...ids].join(',') })
-      }
-    }
+    const seeded: string[] = []
     for (const item of live) {
       if (this.noticed.has(item.id)) continue
       this.noticed.add(item.id)
+      if (this.isHistory(item)) {
+        seeded.push(item.id)
+        continue // predates us — the owner already knows; guard it and stay quiet
+      }
       await Promise.resolve(this.notice.onNotice(item)).catch(err =>
         this.log('notice.face.onNotice.error', { id: item.id, err: String(err) }),
       )
     }
+    if (seeded.length) this.log('notice.face.seeded', { count: seeded.length, ids: seeded.join(',') })
     for (const id of [...this.noticed]) if (!ids.has(id)) this.noticed.delete(id)
   }
 

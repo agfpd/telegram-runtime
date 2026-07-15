@@ -10,6 +10,30 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.27.2] - 2026-07-15
+
+### Fixed
+
+- **Notice seeding now keys on the notice's `createdMs` vs this face's start time,
+  as iapeer's docs/19 obligation 6 prescribes** — not on "whatever happened to be on
+  the board when I first managed to read it". 0.27.1 shipped a hand-rolled
+  approximation of a rule the contract had not yet written down; the contract has
+  since been written (iapeer e5a625a), so the local guess is replaced by the canon
+  mechanism rather than left to drift.
+  - The two agree only when the first board read is instant. They DIVERGE exactly
+    where it hurts: when the daemon is not yet listening at boot the face backs off
+    for seconds or minutes, and a mute raised inside that window is news the owner
+    must receive — but a first-read seed buries it as history. Now delivered.
+  - Simpler as well as more correct: a stateless timestamp comparison, so the seed
+    flag and its "don't burn the seed on a failed read" subtlety are both gone.
+    Correct across a daemon restart too — a restarted board re-detects and stamps a
+    NEWER `createdMs`, so live conditions are delivered rather than suppressed.
+  - The same rule now gates BOTH delivery paths (reconcile and the live SSE raise),
+    so no future replay/backfill can sneak history through.
+  - Approvals remain un-seeded. Per docs/19 the discriminator is not which surface
+    you are but **whether anything is blocked waiting on a human**: a notice blocks
+    nothing; an approval holds a peer's tool call against a ≤300 s default-deny.
+
 ## [0.27.1] - 2026-07-15
 
 ### Fixed
