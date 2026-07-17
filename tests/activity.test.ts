@@ -15,6 +15,7 @@ import {
   parseActivityCommand,
   freshestRuntime,
   pickVerifiedRuntime,
+  shouldRebindTranscript,
 } from '../src/cli.ts'
 
 describe('shortToolName — MCP prefix stripped to the bare gesture', () => {
@@ -347,6 +348,42 @@ describe('skipStatusFlush — v0.7 status-message gates', () => {
   test('an already-open status keeps editing regardless of splash policy', () => {
     expect(skipStatusFlush(true, true, false, false)).toBe(false)
     expect(skipStatusFlush(true, true, true, false)).toBe(false)
+  })
+})
+
+describe('shouldRebindTranscript — fresh-wake stale-binding self-heal gate', () => {
+  // signature: (boundPath, boundMtimeMs, candidatePath, candidateMtimeMs, turnStartedMs, graceMs?)
+  const T = 1_800_000_000_000 // turn start
+  const GRACE = 15_000
+
+  test('the repro: bound to the previous session corpse, fresh file born after turn start → rebind', () => {
+    // mrmechanic 17.07: bound df0c984b (mtime 15.07), 138d6530 born ~1s into the turn
+    expect(shouldRebindTranscript('/p/dead.jsonl', T - 2 * 86_400_000, '/p/live.jsonl', T + 1_000, T, GRACE)).toBe(true)
+  })
+  test('no reader at turn start (first-ever session, reader.none) + fresh candidate → bind', () => {
+    expect(shouldRebindTranscript(null, null, '/p/live.jsonl', T + 2_000, T, GRACE)).toBe(true)
+  })
+  test('bound file advanced since turn start → proved live, never swapped', () => {
+    expect(shouldRebindTranscript('/p/live.jsonl', T + 5_000, '/p/other.jsonl', T + 6_000, T, GRACE)).toBe(false)
+  })
+  test('candidate is the bound file itself → no-op', () => {
+    expect(shouldRebindTranscript('/p/a.jsonl', T - 1_000, '/p/a.jsonl', T + 1_000, T, GRACE)).toBe(false)
+  })
+  test('no candidate at all → keep whatever is bound', () => {
+    expect(shouldRebindTranscript('/p/dead.jsonl', T - 86_400_000, null, null, T, GRACE)).toBe(false)
+  })
+  test('stale candidate (older than turnStart − grace) is a dead file, not a rebind target', () => {
+    expect(shouldRebindTranscript('/p/dead.jsonl', T - 86_400_000, '/p/older.jsonl', T - GRACE - 1, T, GRACE)).toBe(false)
+    expect(shouldRebindTranscript(null, null, '/p/older.jsonl', T - GRACE - 1, T, GRACE)).toBe(false)
+  })
+  test('grace boundary: candidate mtime exactly at turnStart − grace counts as live', () => {
+    expect(shouldRebindTranscript('/p/dead.jsonl', T - 86_400_000, '/p/edge.jsonl', T - GRACE, T, GRACE)).toBe(true)
+  })
+  test('unstat-able candidate (mtime null) is never a rebind target', () => {
+    expect(shouldRebindTranscript('/p/dead.jsonl', T - 86_400_000, '/p/gone.jsonl', null, T, GRACE)).toBe(false)
+  })
+  test('bound file unstat-able (vanished) + fresh candidate → rebind', () => {
+    expect(shouldRebindTranscript('/p/gone.jsonl', null, '/p/live.jsonl', T + 1_000, T, GRACE)).toBe(true)
   })
 })
 

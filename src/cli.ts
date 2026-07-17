@@ -1853,6 +1853,10 @@ const ACTIVITY_LOG_ENABLED = process.env.TELEGRAM_ACTIVITY_LOG !== '0'
 // active rollout is located by scanning recently-modified rollout files and
 // matching session_meta.cwd. Bound the scan to sessions touched this recently.
 const CODEX_SESSION_WINDOW_MS = Number(process.env.TELEGRAM_CODEX_WINDOW_MS ?? '') || 6 * 3600_000
+// Freshness gate for the mid-turn transcript rebind (see shouldRebindTranscript):
+// a candidate transcript counts as born-for-this-turn only when its mtime clears
+// turn start minus this grace (clock/ordering slop cover, mirrors web-runtime).
+const TRANSCRIPT_REBIND_GRACE_MS = Number(process.env.TELEGRAM_TRANSCRIPT_GRACE_MS ?? '') || 15_000
 
 type ToolEvent = { tool: string; label?: string }
 
@@ -2282,7 +2286,47 @@ export function activeTranscriptPath(target: PeerRecord, rt: string = liveRuntim
   return claudeTranscriptPath(target.cwd)
 }
 
-type TranscriptReader = { poll: () => ToolEvent[]; contextTokens: () => number | null }
+type TranscriptReader = {
+  path: string
+  poll: () => ToolEvent[]
+  contextTokens: () => number | null
+}
+
+// Mid-turn stale-binding self-heal gate (pure). A peer woken FRESH creates its
+// new session transcript 1–3 s AFTER the turn starts (measured on web-runtime's
+// sibling engine 17.07.2026: turn start 11:29:21, file born 11:29:22 — the
+// activity engines share this transcript-polling design), so the turn-start
+// bind ("newest .jsonl by mtime") picks the PREVIOUS session's dead file at EOF
+// and the whole first turn streams nothing. Decide whether the bound transcript
+// should be swapped for `candidate`:
+//   • no candidate, or candidate === bound → keep;
+//   • the bound file advanced since turn start → it PROVED itself live, keep
+//     (a same-runtime session never legitimately swaps files mid-turn; runtime
+//     flips have their own rebind path);
+//   • otherwise rebind ONLY to a candidate whose mtime clears turnStart − grace
+//     — born for THIS turn. A dead file of a past session is never a rebind
+//     target (the web-runtime liveness gate, ported).
+export function shouldRebindTranscript(
+  boundPath: string | null,
+  boundMtimeMs: number | null,
+  candidatePath: string | null,
+  candidateMtimeMs: number | null,
+  turnStartedMs: number,
+  graceMs: number = TRANSCRIPT_REBIND_GRACE_MS,
+): boolean {
+  if (!candidatePath || candidatePath === boundPath) return false
+  if (boundPath !== null && boundMtimeMs !== null && boundMtimeMs >= turnStartedMs) return false
+  if (candidateMtimeMs === null) return false
+  return candidateMtimeMs >= turnStartedMs - graceMs
+}
+
+function mtimeMsOrNull(path: string): number | null {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return null
+  }
+}
 
 // Tail the peer's transcript for tool-call gestures appended since the last
 // poll. Byte-offset tailing (not re-reading the whole file): the offset is
@@ -2291,10 +2335,14 @@ type TranscriptReader = { poll: () => ToolEvent[]; contextTokens: () => number |
 // null if no transcript can be located (→ activity silently disabled this turn).
 // Alongside gestures, each poll updates the latest context-token count seen
 // (contextTokens) for the v0.8 completion line — same parse pass, no extra read.
+// fromStart=true replays the file from byte 0 instead of seeking to EOF — used
+// ONLY by the stale-binding rebind, where the gate above guarantees the file was
+// born for this turn, so its whole content IS this turn's state to rebuild.
 function createTranscriptReader(
   target: PeerRecord,
   isOperator?: (personality: string) => boolean,
   rt: string = liveRuntime(target),
+  fromStart = false,
 ): TranscriptReader | null {
   const path = activeTranscriptPath(target, rt)
   if (!path) return null
@@ -2303,11 +2351,12 @@ function createTranscriptReader(
   let offset = 0
   let lastTokens: number | null = null
   try {
-    offset = statSync(path).size
+    offset = fromStart ? 0 : statSync(path).size
   } catch {
     return null
   }
   return {
+    path,
     contextTokens: () => lastTokens,
     poll(): ToolEvent[] {
       try {
@@ -2402,7 +2451,9 @@ async function watchPeerTurn(
   // off: the next status message is born from a real tool call, never a bare
   // splash, so a trailing answer leaves no empty "✓ 0 шагов" stub behind (v0.7).
   let allowSplashOnly = true
-  if (reader) activityCheckpoints.set(target.personality, () => (checkpointRequested = true))
+  // Keyed on activityOn, not the reader: the reader may be born mid-turn (the
+  // stale-binding rebind below), and checkpoints must already be honoured then.
+  if (activityOn) activityCheckpoints.set(target.personality, () => (checkpointRequested = true))
 
   const flush = async (active: boolean): Promise<void> => {
     if (!reader) return // events may be empty: the active frame is then splash-only
@@ -2469,7 +2520,7 @@ async function watchPeerTurn(
   const finalizeAndReset = async (): Promise<void> => {
     if (statusMessageId === null) return
     try {
-      events.push(...reader!.poll())
+      if (reader) events.push(...reader.poll())
     } catch {}
     await flush(false)
     statusMessageId = null
@@ -2482,8 +2533,10 @@ async function watchPeerTurn(
   }
 
   // Fast activity poller — decoupled from the typing cadence. Stops when the
-  // pane loop marks the turn done.
-  const activityLoop = reader
+  // pane loop marks the turn done. Gated on activityOn (not the reader): a peer
+  // waking its first-ever session has NO transcript at turn start (reader.none)
+  // — the loop must already be alive when the rebind below births the reader.
+  const activityLoop = activityOn
     ? (async () => {
         while (!done) {
           // Honour a pending outbound checkpoint BEFORE rendering new activity, so
@@ -2492,7 +2545,7 @@ async function watchPeerTurn(
             checkpointRequested = false
             await finalizeAndReset()
           }
-          const fresh = reader.poll()
+          const fresh = reader ? reader.poll() : []
           if (fresh.length) {
             events.push(...fresh)
             splash = pickSplash() // a fresh verb on each new tool call (v0.6)
@@ -2535,6 +2588,36 @@ async function watchPeerTurn(
             // A failed re-create keeps the stale reader alive: a stale-but-open
             // tail beats killing the channel outright mid-turn.
             if (next) reader = next
+          }
+        }
+      }
+      // Stale-transcript self-heal (the fresh-wake race, found on web-runtime
+      // 17.07.2026): a peer woken FRESH births its new session .jsonl seconds
+      // AFTER this watcher bound "newest by mtime" — the bound file is the
+      // PREVIOUS session's corpse at EOF, so the whole first turn streams
+      // nothing and never recovers on its own. Every pane tick (3 s): while the
+      // bound file has not advanced past turn start (cheap stat — the scan
+      // stops firing the moment the binding proves itself live), re-resolve the
+      // newest transcript and, if a fresh-born one appeared, rebind FROM BYTE 0
+      // — replaying it rebuilds the turn state accumulated during the blind
+      // window. shouldRebindTranscript holds the full gate.
+      if (activityOn) {
+        const boundPath = reader?.path ?? null
+        const boundMtime = boundPath ? mtimeMsOrNull(boundPath) : null
+        if (!reader || boundMtime === null || boundMtime < started) {
+          const candidate = activeTranscriptPath(target, rt)
+          const candidateMtime = candidate ? mtimeMsOrNull(candidate) : null
+          if (shouldRebindTranscript(boundPath, boundMtime, candidate, candidateMtime, started)) {
+            const next = createTranscriptReader(target, isOperator, rt, true)
+            if (next) {
+              reader = next
+              logActivity('reader.rebind', {
+                peer: target.personality,
+                runtime: rt,
+                from: boundPath ? basename(boundPath) : null,
+                to: basename(next.path),
+              })
+            }
           }
         }
       }
