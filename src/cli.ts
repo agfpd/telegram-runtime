@@ -3013,7 +3013,21 @@ export async function handleRuntimeSwitchCommand(
 //      local CLI fallback; writes <name>.txt to a temp --output-dir.
 //   3. null — caller delivers the raw audio as an attachment (degrade safely).
 // TELEGRAM_STT_PROMPT (optional) primes the decoder for both tiers — see below.
-async function transcribeVoice(filePath: string): Promise<string | null> {
+// Pick the transcript the fallback CLI actually wrote in its per-call output-dir.
+// NEVER guess the name blind: mlx_whisper truncates the stem at the FIRST dot
+// (`voice.2026.07.22.ogg` → `voice.txt`), so the drop-last-extension guess misses
+// and a valid voice message is lost silently. The listing is the source of truth;
+// the guess is only a preferred candidate for the (rare) multi-file case.
+export function pickTranscriptFile(listing: string[], filePath: string): string | undefined {
+  const name = basename(filePath)
+  const txts = listing.filter((f) => f.toLowerCase().endsWith('.txt'))
+  if (txts.length === 0) return undefined
+  const lastDot = name.replace(/\.[^.]+$/, '') + '.txt'
+  const firstDot = name.split('.')[0] + '.txt'
+  return txts.find((f) => f === lastDot) ?? txts.find((f) => f === firstDot) ?? txts[0]
+}
+
+export async function transcribeVoice(filePath: string): Promise<string | null> {
   const lang = (process.env.TELEGRAM_STT_LANGUAGE ?? '').trim()
   // Optional decoder-priming prompt. Not transcribed into the output; it biases
   // punctuation, casing and term spelling (e.g. "Claude Code"/"Gemini" stay in
@@ -3064,10 +3078,17 @@ async function transcribeVoice(filePath: string): Promise<string | null> {
       if (prompt) cmdArgs.push('--initial-prompt', prompt)
       const r = spawnSync(cmd, cmdArgs, { encoding: 'utf8', timeout: timeoutMs * 4 })
       if (r.status === 0) {
-        const txtPath = join(outDir, basename(filePath).replace(/\.[^.]+$/, '') + '.txt')
-        if (existsSync(txtPath)) {
-          const text = readFileSync(txtPath, 'utf8').trim()
+        const listing = readdirSync(outDir)
+        const picked = pickTranscriptFile(listing, filePath)
+        if (picked) {
+          const text = readFileSync(join(outDir, picked), 'utf8').trim()
           if (text) return text
+          process.stderr.write(`telegram-runtime: STT fallback transcript empty (${picked})\n`)
+        } else {
+          process.stderr.write(
+            `telegram-runtime: STT fallback produced no transcript for ${basename(filePath)}; ` +
+              `output-dir listing: [${listing.join(', ')}]\n`,
+          )
         }
       } else {
         process.stderr.write(
