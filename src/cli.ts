@@ -13,7 +13,6 @@ import {
   renameSync,
   rmSync,
   statSync,
-  unlinkSync,
   writeFileSync,
 } from 'fs'
 import { homedir, tmpdir } from 'os'
@@ -52,6 +51,7 @@ import { buildNoticeText } from './noticeCard.ts'
 // change (e.g. NAME_RE) is made ONCE, not in two places.
 import { BOT_USERNAME_RE, IAPEER_DIR, NAME_RE, PEER_PROFILE_FILE, RUNTIME } from './constants.ts'
 import { writeJsonAtomic } from './fsAtomic.ts'
+import { acquireProcessLock, type ReleaseLock } from './botLock.ts'
 
 const MAX_TELEGRAM_TEXT = 4096
 // Outbound send hardening: a hung Telegram API call (transient network /
@@ -259,8 +259,6 @@ type RuntimeContext = {
 }
 
 class TelegramRuntimeError extends Error {}
-
-type ReleaseLock = () => void
 
 function usage(): string {
   return `Usage:
@@ -702,53 +700,11 @@ function botLockPath(botKey: string): string {
   return join(botDir(botKey), 'runtime.lock')
 }
 
-function processIsAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (err) {
-    if (
-      err &&
-      typeof err === 'object' &&
-      'code' in err &&
-      (err as { code?: unknown }).code === 'EPERM'
-    ) {
-      return true
-    }
-    return false
-  }
-}
-
 function acquireBotLock(botKey: string): ReleaseLock {
-  const path = botLockPath(botKey)
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   try {
-    const previousPid = Number(readFileSync(path, 'utf8').trim())
-    if (processIsAlive(previousPid)) {
-      throw new TelegramRuntimeError(`bot "${botKey}" is already owned by pid ${previousPid}`)
-    }
-    rmSync(path, { force: true })
+    return acquireProcessLock(botLockPath(botKey), `bot "${botKey}"`)
   } catch (err) {
-    if (err instanceof TelegramRuntimeError) throw err
-  }
-
-  let fd: number
-  try {
-    fd = openSync(path, 'wx', 0o600)
-  } catch (err) {
-    throw new TelegramRuntimeError(
-      `bot "${botKey}" lock is busy at ${path}: ${formatError(err)}`,
-    )
-  }
-  writeFileSync(fd, `${process.pid}\n`)
-  closeSync(fd)
-  return () => {
-    try {
-      if (readFileSync(path, 'utf8').trim() === String(process.pid)) unlinkSync(path)
-    } catch {
-      // Best-effort cleanup only; stale lock detection runs on next startup.
-    }
+    throw new TelegramRuntimeError(formatError(err))
   }
 }
 

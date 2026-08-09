@@ -38,7 +38,7 @@ The commands edit the profile carefully: they write only their own binding field
 
 ## Multiple bots under one process
 
-Different agents have different bots, but **one process** of the bridge polls them all. Each bot is held by exactly one process (via a lock file): if the process restarts, the lock passes to the new one and a dead lock is cleared. So multiple bots run in parallel without interfering or duplicating.
+Different agents have different bots, but **one process** of the bridge polls them all. Each bot is held by exactly one process (via a lock file): if the process restarts, the lock passes to the new one and a dead lock is cleared. The lock identifies the process instance by its PID **plus birth time and executable**, so macOS reusing a dead bridge's PID for an unrelated live process does not leave the runtime permanently blocked. Lock publication is atomic, and a genuinely concurrent bridge still cannot poll the same bot. So multiple bots run in parallel without interfering or duplicating.
 
 ## Integrity check
 

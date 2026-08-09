@@ -10,6 +10,21 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.28.2] - 2026-08-09
+
+### Fixed
+
+- **Bot locks no longer confuse a reused PID with the original bridge process.**
+  `runtime.lock` now records the owning process birth time, executable/command and
+  a per-instance nonce instead of trusting `kill(pid, 0)` alone. A live unrelated
+  process that inherited a dead bridge's PID is recognized as stale, while a lock
+  whose full process identity still matches continues to block a second poller.
+  Legacy PID-only locks remain migration-compatible: a live telegram-runtime is
+  respected, but a PID now owned by another executable is reclaimed.
+- Lock publication is now an atomic hard-link of a fully-written owner record, so
+  a concurrent starter cannot mistake an empty/partially-written lock for stale;
+  cleanup also keys on the instance nonce and inode rather than PID alone.
+
 ## [0.27.2] - 2026-07-15
 
 ### Fixed
