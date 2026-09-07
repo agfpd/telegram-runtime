@@ -72,6 +72,11 @@ You rarely need these — the defaults are tuned. They're listed so the behavior
 | `TELEGRAM_OUTBOUND_TIMEOUT_MS` | 30000 | timeout for one send to Telegram |
 | `TELEGRAM_OUTBOUND_RETRIES` | 2 | retries on a failed outbound send |
 | `TELEGRAM_IAP_SEND_TIMEOUT_MS` | 60000 | timeout for delivering one inbound message to a peer |
+| `TELEGRAM_POLL_TIMEOUT_SECONDS` | 30 | Telegram server wait for each `getUpdates` long poll |
+| `TELEGRAM_POLL_STALL_MS` | 45000 | hard end-to-end deadline after which a stuck poller generation is replaced; defaults to at least the server wait plus 15 s |
+| `TELEGRAM_POLL_STOP_STALL_MS` | 10000 | deadline for grammY's final offset-confirm request while replacing a poller |
+| `TELEGRAM_POLL_HEARTBEAT_MS` | 300000 | interval for aggregated per-bot polling-health events |
+| `TELEGRAM_POLL_LOG` | on | structured polling events on stderr; `0` disables them |
 | `TELEGRAM_NEW_TIMEOUT_MS` | 300000 | timeout for the `/new` command (5 min) |
 | `TELEGRAM_COMPACT_TIMEOUT_MS` | 300000 | timeout for the `/compact` command (5 min) |
 

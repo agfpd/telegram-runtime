@@ -10,6 +10,24 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.28.3] - 2026-09-07
+
+### Fixed
+
+- **Inbound polling can no longer remain silently false-green while the process
+  and outbound path stay healthy.** Each bot's `getUpdates` request now has an
+  independent end-to-end deadline that covers both the fetch and response body;
+  it is enforced with a promise race as well as cancellation, so even a
+  cancellation-ignoring transport cannot park the grammY loop indefinitely.
+  A stalled bot generation is stopped and replaced without restarting the
+  process, the other bot pollers, or the outbound queue.
+- Added per-bot structured polling evidence: aggregated healthy heartbeats
+  distinguish ordinary empty long polls (`emptyCycles`) from returned updates,
+  while `poll.stalled`, `poll.restart`, `poll.failed`, and rate-limited
+  `poll.error` events form the monitor contract. Regression coverage drives a
+  never-settling transport through the real grammY `Bot` and proves outbound
+  remains usable while only the stuck generation is replaced.
+
 ## [0.28.2] - 2026-08-09
 
 ### Fixed

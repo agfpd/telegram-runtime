@@ -27,6 +27,32 @@ The bridge sits at the seam between two worlds:
 
 So it doesn't route on its own — routing between peers is done by the iapeer daemon; the bridge only translates between Telegram and the iapeer protocol. Control commands from the chat it executes through iapeer's control commands: `/stop` via `iapeer interrupt` (interrupt the turn), `/new` and `/compact` via the same-named commands.
 
+## Polling health and monitor contract
+
+Process health and outbound delivery do not prove that inbound long polling is
+advancing. The bridge therefore supervises every bot separately. A completed
+`getUpdates` response is buffered inside a hard deadline (including its body),
+and an over-deadline request causes only that bot's grammY generation to be
+stopped and replaced. Other bot pollers and outbound delivery remain live.
+
+Structured stderr lines start with `telegram-runtime polling `. Monitor the
+JSON payload by `botKey` and `generation`:
+
+| Event | Meaning |
+|---|---|
+| `poll.start` | a bot generation entered long polling |
+| `poll.heartbeat` | healthy completed cycles; `emptyCycles` explicitly counts ordinary no-message long polls, while `updates` counts returned updates |
+| `poll.error` | a non-stall transport failure (rate-limited to one line/minute per generation) |
+| `poll.stalled` | one `getUpdates` exceeded `deadlineMs`; alert-worthy and followed by self-healing |
+| `poll.restart` | the stalled generation was fenced and the next generation will start |
+| `poll.failed` | a generation exited with an error and will be retried with backoff |
+
+A monitor should alert immediately on `poll.stalled`, and require the matching
+`poll.restart` followed by `poll.start` for the same `botKey`. It should also
+alert if a started bot has no `poll.heartbeat` for longer than the configured
+heartbeat interval plus the stall deadline. Lack of inbound user messages is
+not a health signal: an idle bot reports healthy `emptyCycles`.
+
 ## Dependencies
 
 | Dependency | Required | Without it |

@@ -52,6 +52,12 @@ import { buildNoticeText } from './noticeCard.ts'
 import { BOT_USERNAME_RE, IAPEER_DIR, NAME_RE, PEER_PROFILE_FILE, RUNTIME } from './constants.ts'
 import { writeJsonAtomic } from './fsAtomic.ts'
 import { acquireProcessLock, type ReleaseLock } from './botLock.ts'
+import {
+  createGuardedPollingFetch,
+  supervisePolling,
+  type FetchLike,
+  type PollingGeneration,
+} from './pollingSupervisor.ts'
 
 const MAX_TELEGRAM_TEXT = 4096
 // Outbound send hardening: a hung Telegram API call (transient network /
@@ -68,6 +74,15 @@ const OUTBOUND_SEND_RETRIES = Number(process.env.TELEGRAM_OUTBOUND_RETRIES ?? ''
 // stuck CLI child. The verdict is "not delivered: …" — no auto-retry, no silent
 // loss.
 const IAP_SEND_TIMEOUT_MS = Number(process.env.TELEGRAM_IAP_SEND_TIMEOUT_MS ?? '') || 60_000
+// grammY's long-poll timeout is a Telegram server wait, not a liveness bound:
+// a broken transport can remain pending after that server timeout. Every bot
+// therefore has a per-request hard deadline and a generation restart boundary.
+// The default leaves 15 s of network/body-read headroom above the 30 s poll.
+const POLL_TIMEOUT_SECONDS = Number(process.env.TELEGRAM_POLL_TIMEOUT_SECONDS ?? '') || 30
+const POLL_STALL_MS =
+  Number(process.env.TELEGRAM_POLL_STALL_MS ?? '') || Math.max(45_000, (POLL_TIMEOUT_SECONDS + 15) * 1000)
+const POLL_STOP_STALL_MS = Number(process.env.TELEGRAM_POLL_STOP_STALL_MS ?? '') || 10_000
+const POLL_HEARTBEAT_MS = Number(process.env.TELEGRAM_POLL_HEARTBEAT_MS ?? '') || 300_000
 // Rich messages (Bot API 10.1, released 2026-06-11): an outbound peer envelope
 // is sent as ONE rich message — `InputRichMessage.markdown` carries the agent's
 // GFM verbatim and Telegram parses it SERVER-SIDE ("Rich Markdown is compatible
@@ -1546,6 +1561,22 @@ function logInbound(event: string, fields: Record<string, unknown> = {}): void {
     if (v !== undefined) payload[k] = v
   }
   process.stderr.write(`telegram-runtime inbound ${JSON.stringify(payload)}\n`)
+}
+
+// Per-bot long-poll health. A message-free bot is healthy when its empty
+// getUpdates cycles keep completing; "no inbound messages" alone cannot tell
+// that apart from a request stuck for days. Heartbeats aggregate the ordinary
+// empty cycles to avoid one log line per bot every 30 seconds. Stalls and
+// generation restarts are emitted immediately for monitor alerting.
+const POLLING_LOG_ENABLED = process.env.TELEGRAM_POLL_LOG !== '0'
+
+function logPolling(event: string, fields: Record<string, unknown> = {}): void {
+  if (!POLLING_LOG_ENABLED) return
+  const payload: Record<string, unknown> = { ts: new Date().toISOString(), evt: event }
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== undefined) payload[k] = v
+  }
+  process.stderr.write(`telegram-runtime polling ${JSON.stringify(payload)}\n`)
 }
 
 // Classify an outbound send failure so the log distinguishes the failure modes
@@ -3715,24 +3746,51 @@ function installBotHandlers(ctx: RuntimeContext, botKey: string, bot: Bot, crede
   })
 }
 
-async function startPolling(botKey: string, bot: Bot): Promise<void> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      await bot.start({
-        onStart: info => {
-          attempt = 0
-          process.stderr.write(`telegram-runtime: polling ${botKey} as @${info.username}\n`)
-        },
-      })
-      return
-    } catch (err) {
-      const delay = Math.min(1000 * attempt, 15000)
-      process.stderr.write(
-        `telegram-runtime: polling ${botKey} failed: ${formatError(err)}, retrying in ${delay / 1000}s\n`,
-      )
-      await sleep(delay)
-    }
-  }
+function makePollingGeneration(
+  ctx: RuntimeContext,
+  botKey: string,
+  credential: BotCredential,
+  generation: number,
+): PollingGeneration<Bot> {
+  const guarded = createGuardedPollingFetch({
+    botKey,
+    generation,
+    fetch: runtimeFetch as unknown as FetchLike,
+    log: logPolling,
+    stallMs: POLL_STALL_MS,
+    stopStallMs: POLL_STOP_STALL_MS,
+    heartbeatMs: POLL_HEARTBEAT_MS,
+  })
+  const bot = new Bot(credential.token, { client: { fetch: guarded.fetch as typeof fetch } })
+  installBotHandlers(ctx, botKey, bot, credential)
+  return { bot, stalled: guarded.stalled }
+}
+
+async function startPolling(
+  ctx: RuntimeContext,
+  botKey: string,
+  credential: BotCredential,
+  initial: PollingGeneration<Bot>,
+): Promise<void> {
+  await supervisePolling<Bot, Awaited<ReturnType<Bot['api']['getMe']>>>({
+    botKey,
+    pollTimeoutSeconds: POLL_TIMEOUT_SECONDS,
+    initial,
+    makeGeneration: generation => makePollingGeneration(ctx, botKey, credential, generation),
+    publish: bot => {
+      // Outbound routing always dereferences this map at send time. Replacing
+      // only the affected bot keeps every other poller and the outbound queue
+      // alive while this generation heals.
+      ctx.bots.set(botKey, bot)
+    },
+    onStart: info => {
+      process.stderr.write(`telegram-runtime: polling ${botKey} as @${info.username}\n`)
+    },
+    log: logPolling,
+    // Bot.stop's final offset-confirm request has its own guarded 10 s
+    // deadline. This outer wait is only a last-resort generation fence.
+    stopWaitMs: POLL_STOP_STALL_MS + 5000,
+  })
 }
 
 // A line that BELONGS to a plain text paragraph — i.e. not a structural GFM
@@ -4273,6 +4331,7 @@ async function runCommand(): Promise<void> {
   }
   const credentials = new Map<string, BotCredential>()
   const bots = new Map<string, Bot>()
+  const initialPollers = new Map<string, PollingGeneration<Bot>>()
   const releaseLocks: ReleaseLock[] = []
   let commandsSyncTimer: ReturnType<typeof setInterval> | undefined
   let fleetFace: FleetFace | null = null
@@ -4294,9 +4353,8 @@ async function runCommand(): Promise<void> {
     releaseLocks.push(acquireBotLock(key))
     const credential = loadCredential(key)
     credentials.set(key, credential)
-    bots.set(key, new Bot(credential.token, { client: { fetch: runtimeFetch as typeof fetch } }))
   }
-  if (bots.size === 0) throw new TelegramRuntimeError(`${botsRoot()} has no configured bots`)
+  if (credentials.size === 0) throw new TelegramRuntimeError(`${botsRoot()} has no configured bots`)
   // The shared approval service-bot (Ф3 U4): the loaded credential marked role=approval.
   // Faceless peers' cards route to it (pickApprovalRoute). At most one is expected; if the
   // owner declined onboarding there is none → faceless approvals stay on the bar/CLI.
@@ -4310,8 +4368,12 @@ async function runCommand(): Promise<void> {
     credentials,
     approvalBotKey,
   }
-  for (const [botKey, bot] of bots) {
-    installBotHandlers(ctx, botKey, bot, credentials.get(botKey)!)
+  // Build generation 1 before owner-facing surfaces start, so approval/notice
+  // routing sees the complete bot map just as it did before supervision.
+  for (const [botKey, credential] of credentials) {
+    const initial = makePollingGeneration(ctx, botKey, credential, 1)
+    initialPollers.set(botKey, initial)
+    bots.set(botKey, initial.bot)
   }
   installStdinEnvelopeReader(ctx)
   // Owner-facing fleet faces (Ф3): ONE SSE subscription serving approval cards (docs/17)
@@ -4331,7 +4393,11 @@ async function runCommand(): Promise<void> {
     for (const [botKey, bot] of bots) void syncBotCommands(ctx, botKey, bot)
   }, commandsSyncMs)
   commandsSyncTimer.unref?.()
-  await Promise.all(Array.from(bots.entries()).map(([key, bot]) => startPolling(key, bot)))
+  await Promise.all(
+    Array.from(credentials.entries()).map(([key, credential]) =>
+      startPolling(ctx, key, credential, initialPollers.get(key)!),
+    ),
+  )
 }
 
 // `telegram-runtime` (bare) / `self-install`: the npx self-deploy contract. Place the
