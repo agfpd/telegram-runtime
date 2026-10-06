@@ -18,6 +18,29 @@ iapeer update-runtime telegram    # update, restarting the runtime's peers
 
 Install is idempotent: it places the binary and writes the manifest atomically. When provisioning each peer, iapeer invokes the runtime's config hook (`self-config`), which writes the peer's Telegram bindings and, if any, the bot credentials.
 
+### macOS executable signature gate
+
+Both compilation and copy-self stage the executable in a sibling temporary file.
+After `chmod`, and **before replacing the installed binary or writing its manifest**,
+the installer runs `/usr/bin/codesign --verify --deep --strict` on that staged file.
+A valid signature is left unchanged, preserving its signing identity. An invalid
+signature is repaired with `/usr/bin/codesign --force --sign -` and must pass the
+same strict verification again. A missing/killed verifier, signing failure, or
+failed second verification aborts installation, removes the temporary file, and
+leaves the previous binary and manifest untouched. Non-macOS installs skip this
+gate. This is a local implementation of the runtime-package contract; direct
+`npx` installation requires no core signing helper dependency.
+
+The strict verification flags follow [Apple's code-signing guidance](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html).
+They validate the signature, not notarization or Gatekeeper distribution trust.
+
+Before a coordinated host update, keep a backup of the currently running,
+strict-verified executable and its matching manifest. If behavioral acceptance
+fails, restore **that pair** and restart the Telegram peer through iapeer's
+`stop`/`start` lifecycle. Do not roll back by re-running an older installer that
+lacks the signature gate. Activation and rollback restart the whole bridge and
+must be coordinated by the host administrator, keeping web available as a backup.
+
 ## How the bridge fits into messaging
 
 The bridge sits at the seam between two worlds:

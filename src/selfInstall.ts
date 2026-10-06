@@ -20,12 +20,12 @@
 // (the package now owns this path); a sandbox proof sets IAPEER_BIN_DIR so a test never
 // touches the real ~/.local/bin.
 
-import { spawnSync } from 'child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, statSync } from 'fs'
+import { chmodSync, copyFileSync, mkdirSync, renameSync, rmSync, statSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { BIN_NAME, PACKAGE_NAME } from './constants.ts'
 import { scaffoldHostDocs, type HostDocsResult } from './hostDocs.ts'
+import { ensureExecutableSignature, runInstallCommand, type InstallCommandRunner } from './installSignature.ts'
 import { buildManifest, resolveIapeerRoot, writeManifestAtomic } from './manifest.ts'
 
 /** The launcher binary name (`telegram-runtime`). Re-exported so callers/tests have a
@@ -45,6 +45,9 @@ export interface SelfInstallOptions {
    *  `sourceEntry` (`<pkg>/src/cli.ts` → `<pkg>/docs`). Missing (e.g. running from a
    *  compiled bin with no source tree) → soft-skip, never fails the install. */
   docsSource?: string
+  /** Test seams for compile/signature checks; defaults are the actual host + runner. */
+  platform?: NodeJS.Platform
+  run?: InstallCommandRunner
 }
 
 export type SelfInstallBinMode = 'compiled' | 'copied-self'
@@ -89,7 +92,7 @@ function isBunInterpreter(execPath: string): boolean {
 
 function cleanup(path: string): void {
   try {
-    if (existsSync(path)) renameSync(path, `${path}.dead`)
+    rmSync(path, { force: true })
   } catch {
     // best-effort
   }
@@ -114,41 +117,42 @@ export function selfInstall(opts: SelfInstallOptions = {}): SelfInstallResult {
   // `<pkg>/docs` from the source entry's package root (`<pkg>/src/cli.ts` → `<pkg>/docs`).
   const docsSource = opts.docsSource ?? join(dirname(sourceEntry), '..', 'docs')
   const execPath = opts.execPath ?? process.execPath
+  const run = opts.run ?? runInstallCommand
   const binDir = resolveBinDir(env)
   const binPath = join(binDir, BIN_NAME)
 
   mkdirSync(binDir, { recursive: true, mode: 0o755 })
 
   // Build to a sibling tmp in the SAME dir (rename is atomic only within one FS), then
-  // chmod +x and rename over the target. A reader of `telegram-runtime` never sees a
-  // half-written file, and a legacy symlink at binPath is replaced atomically.
+  // chmod +x, verify/repair the macOS signature, then rename over the target. Neither
+  // the old bin nor its manifest is touched if compilation/copy/signature checks fail.
   const tmp = `${binPath}.tmp.${process.pid}.${Math.abs(hashStr(binPath + execPath))}`
   let binMode: SelfInstallBinMode
 
-  if (isCompilableSource(sourceEntry) && isBunInterpreter(execPath)) {
-    // PRIMARY path: running under bun from the package source (npx → bin → bun cli.ts).
-    // Compile a self-contained snapshot (bundles grammy) so the installed bin does not
-    // depend on the npm cache (GC'd) or the source tree.
-    const r = spawnSync(execPath, ['build', '--compile', '--outfile', tmp, sourceEntry], {
-      encoding: 'utf8',
-      env: env as Record<string, string>,
-    })
-    if (r.error || (r.status ?? 1) !== 0) {
-      cleanup(tmp)
-      throw new Error(
-        `self-install: bun build --compile failed: ${(r.stderr || r.stdout || r.error?.message || `exit ${r.status}`).trim()}`,
-      )
+  try {
+    if (isCompilableSource(sourceEntry) && isBunInterpreter(execPath)) {
+      // PRIMARY path: npx → bin → bun cli.ts. Compile a self-contained snapshot
+      // (bundles grammy) independent of the npm cache (GC'd) and source tree.
+      const r = run(execPath, ['build', '--compile', '--outfile', tmp, sourceEntry], env)
+      if (r.error || r.signal || (r.status ?? 1) !== 0) {
+        throw new Error(
+          `self-install: bun build --compile failed: ${(r.stderr || r.stdout || r.error?.message || `signal ${r.signal}, exit ${r.status}`).trim()}`,
+        )
+      }
+      binMode = 'compiled'
+    } else {
+      // FALLBACK: no source / execPath is not bun. Copy the running executable,
+      // subject to the SAME staged signature gate as the compile path.
+      copyFileSync(execPath, tmp)
+      binMode = 'copied-self'
     }
-    binMode = 'compiled'
-  } else {
-    // FALLBACK: running from an already-compiled bin (no .ts source / execPath is not
-    // bun). Re-assert the install by copying the running executable into binDir.
-    copyFileSync(execPath, tmp)
-    binMode = 'copied-self'
-  }
 
-  chmodSync(tmp, 0o755)
-  renameSync(tmp, binPath)
+    chmodSync(tmp, 0o755)
+    ensureExecutableSignature(tmp, { platform: opts.platform, env, run })
+    renameSync(tmp, binPath)
+  } finally {
+    cleanup(tmp)
+  }
 
   // Manifest pins the ABSOLUTE installed bin into the self-config descriptor.
   const manifest = buildManifest(binPath)
