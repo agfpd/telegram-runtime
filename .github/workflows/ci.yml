@@ -20,3 +20,9 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run test
       - run: bun run typecheck
+      - name: Verify self-contained native archive (no host reserve)
+        run: |
+          mkdir "$RUNNER_TEMP/telegram-artifact"
+          npm pack --pack-destination "$RUNNER_TEMP/telegram-artifact"
+          tar -xzf "$RUNNER_TEMP/telegram-artifact/"*.tgz -C "$RUNNER_TEMP/telegram-artifact"
+          bun "$RUNNER_TEMP/telegram-artifact/package/scripts/verify-install.ts" --output "$RUNNER_TEMP/telegram-native-proof"

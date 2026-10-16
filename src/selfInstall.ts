@@ -20,13 +20,14 @@
 // (the package now owns this path); a sandbox proof sets IAPEER_BIN_DIR so a test never
 // touches the real ~/.local/bin.
 
-import { chmodSync, copyFileSync, mkdirSync, renameSync, rmSync, statSync } from 'fs'
+import { chmodSync, copyFileSync, mkdirSync, rmSync, statSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { BIN_NAME, PACKAGE_NAME } from './constants.ts'
 import { scaffoldHostDocs, type HostDocsResult } from './hostDocs.ts'
 import { ensureExecutableSignature, runInstallCommand, type InstallCommandRunner } from './installSignature.ts'
-import { buildManifest, resolveIapeerRoot, writeManifestAtomic } from './manifest.ts'
+import { publishInstallPair } from './installPair.ts'
+import { buildManifest, resolveIapeerRoot } from './manifest.ts'
 
 /** The launcher binary name (`telegram-runtime`). Re-exported so callers/tests have a
  *  single import surface for the self-install contract. */
@@ -108,8 +109,8 @@ function hashStr(s: string): number {
 
 /**
  * Self-install: place the launcher on PATH + write the manifest. IDEMPOTENT — a
- * repeat run produces the same on-disk bin and a byte-identical manifest (atomic
- * overwrite-in-place; no duplicated or divergent state). Returns what it did.
+ * repeat run leaves a valid executable and a byte-identical manifest. Signature or
+ * synchronous publication errors preserve/restore the previous installed pair.
  */
 export function selfInstall(opts: SelfInstallOptions = {}): SelfInstallResult {
   const env = opts.env ?? process.env
@@ -128,6 +129,7 @@ export function selfInstall(opts: SelfInstallOptions = {}): SelfInstallResult {
   // the old bin nor its manifest is touched if compilation/copy/signature checks fail.
   const tmp = `${binPath}.tmp.${process.pid}.${Math.abs(hashStr(binPath + execPath))}`
   let binMode: SelfInstallBinMode
+  let manifestPath: string
 
   try {
     if (isCompilableSource(sourceEntry) && isBunInterpreter(execPath)) {
@@ -149,14 +151,10 @@ export function selfInstall(opts: SelfInstallOptions = {}): SelfInstallResult {
 
     chmodSync(tmp, 0o755)
     ensureExecutableSignature(tmp, { platform: opts.platform, env, run })
-    renameSync(tmp, binPath)
+    manifestPath = publishInstallPair(tmp, binPath, buildManifest(binPath), env)
   } finally {
     cleanup(tmp)
   }
-
-  // Manifest pins the ABSOLUTE installed bin into the self-config descriptor.
-  const manifest = buildManifest(binPath)
-  const manifestPath = writeManifestAtomic(manifest, env)
 
   // FU6 on-host docs — stage this version's public docs to <root>/docs/telegram-runtime/.
   // Best-effort: scaffoldHostDocs already soft-skips missing source / copy errors; the

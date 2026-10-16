@@ -10,6 +10,28 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.28.4] - 2026-10-16
+
+### Fixed
+
+- Both native compile and copy-self verify the staged macOS executable with
+  `codesign --verify --deep --strict` before replacing the installed pair. Only
+  invalid signatures are ad-hoc repaired and re-verified; valid identities remain
+  unchanged. Signature failure removes staging files without changing the pair.
+- Stage the manifest before binary publication and retain the previous binary
+  until the manifest rename succeeds. Synchronous publication failures restore
+  the previous binary; rollback failure preserves its recovery file and reports
+  the failure. This is not a power-loss-atomic two-path transaction.
+
+### Packaging
+
+- Bundle the exact runtime dependency tree and a standalone real macOS acceptance
+  probe, including isolated restoration of a read-only current host reserve.
+  Repetition from the archive needs no checkout, npm cache or network access.
+- This unpublished candidate also includes the previously unpublished 0.28.3
+  polling supervisor described below; native CLI/signature acceptance does not
+  establish Telegram or polling behavioral acceptance.
+
 ## [0.28.3] - 2026-09-07
 
 ### Fixed

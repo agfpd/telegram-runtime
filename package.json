@@ -8,10 +8,13 @@
     "telegram-runtime": "bin/telegram-runtime"
   },
   "files": [
+    "CHANGELOG.md",
     "bin/",
     "src/",
     "docs/*.md",
     "docs/ru/",
+    "scripts/verify-install.ts",
+    "scripts/verify-install.md",
     "tsconfig.json"
   ],
   "scripts": {
@@ -25,6 +28,7 @@
   "dependencies": {
     "grammy": "^1.44.0"
   },
+  "bundleDependencies": ["grammy"],
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "latest"

@@ -16,7 +16,12 @@ iapeer install-runtime telegram   # the same through iapeer
 iapeer update-runtime telegram    # update, restarting the runtime's peers
 ```
 
-Install is idempotent: it places the binary and writes the manifest atomically. When provisioning each peer, iapeer invokes the runtime's config hook (`self-config`), which writes the peer's Telegram bindings and, if any, the bot credentials.
+Install is idempotent: binary and manifest replacements are individually atomic.
+The manifest is staged first, and a retained previous binary permits rollback on
+synchronous publication failure. This is not a power-loss-atomic transaction
+across two paths. When provisioning each peer, iapeer invokes the runtime's config
+hook (`self-config`), which writes the peer's Telegram bindings and, if any, the
+bot credentials.
 
 ### macOS executable signature gate
 
@@ -33,6 +38,11 @@ gate. This is a local implementation of the runtime-package contract; direct
 
 The strict verification flags follow [Apple's code-signing guidance](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html).
 They validate the signature, not notarization or Gatekeeper distribution trust.
+
+The archive bundles its runtime dependencies and a [standalone native acceptance
+probe](../scripts/verify-install.md). Repeating installation, real signature
+refusal and isolated restoration of a current host reserve requires no checkout,
+npm cache or network. CLI execution is not Telegram/polling acceptance.
 
 Before a coordinated host update, keep a backup of the currently running,
 strict-verified executable and its matching manifest. If behavioral acceptance
