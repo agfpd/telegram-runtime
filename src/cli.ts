@@ -22,7 +22,9 @@ import { selfInstall } from './selfInstall.ts'
 import { runSelfConfig } from './selfConfig.ts'
 import {
   APPROVALS_PATH,
+  agentEndpointsFromSnapshot,
   fleetAvailable,
+  getFleetSnapshot,
   listApprovals,
   listNotices,
   NOTICES_PATH,
@@ -2868,21 +2870,47 @@ export function parseLifecycleCommand(text: string): 'new' | 'compact' | null {
   return null
 }
 
-// The agent runtimes a peer can be HARD-switched to from Telegram. `telegram` is a
-// presence runtime (the human side), never a switch target. A bare `/<runtime>`
-// (e.g. `/codex`) is a CONTROL command in the two-level model — a reserved bare-slash
-// name, distinct from the `/alias_*` prompt namespace.
-const RUNTIME_SWITCH_RUNTIMES = ['claude', 'codex'] as const
+// The agent runtimes a peer can be HARD-switched to from Telegram come from the core's
+// agent-endpoint DISCOVERY (docs/15 `runtimes[].agent`, iapeer 2197de5) — never a local
+// runtime list (the old ['claude','codex'] hardcode could not offer opencode) and never a
+// PATH probe. A pre-discovery daemon omits `agent` → NO runtime is offered (docs/15 MUST).
+// Cached per personality: the menu sync and every inbound bare `/<word>` read it, and a
+// snapshot is a whole-fleet read, so one fetch serves all bots for AGENT_RT_TTL_MS.
+const AGENT_RT_TTL_MS = 30_000
+let agentRtCache: { at: number; snapshot: unknown } | null = null
+let agentRtInflight: Promise<unknown> | null = null
+async function fleetSnapshotCached(): Promise<unknown> {
+  if (agentRtCache && Date.now() - agentRtCache.at < AGENT_RT_TTL_MS) return agentRtCache.snapshot
+  agentRtInflight ??= getFleetSnapshot(resolveFleetBase())
+    .then(snapshot => {
+      agentRtCache = { at: Date.now(), snapshot }
+      return snapshot
+    })
+    .finally(() => {
+      agentRtInflight = null
+    })
+  return agentRtInflight
+}
+/** Offerable agent endpoints for a personality; [] when undiscoverable or the daemon is
+ *  unreachable (a menu/control convenience must never throw into delivery). */
+export async function agentRuntimesFor(personality: string): Promise<string[]> {
+  try {
+    return agentEndpointsFromSnapshot(await fleetSnapshotCached(), personality) ?? []
+  } catch {
+    return []
+  }
+}
 
-// Parse a hard runtime-switch control command: a BARE `/claude` / `/codex` (optionally
-// with Telegram's appended @botname), nothing else. Returns the target runtime, or null
-// when the text is not a known-runtime switch. Validation that the TARGET peer actually
-// declares the runtime happens in the handler (clean per-peer feedback). Same
-// fleet-safety as the lifecycle/stop parsers: any argument or trailing text fails.
-export function parseRuntimeSwitchCommand(text: string): string | null {
-  const m = /^\/([a-z]+)(?:@\w+)?$/.exec(text.trim().toLowerCase())
+// Parse a hard runtime-switch control command: a BARE `/<runtime>` (optionally with
+// Telegram's appended @botname), nothing else, where <runtime> is one of `candidates` —
+// the peer's DECLARED runtimes plus its discovered agent endpoints. Declared-but-not-agent
+// names are still intercepted on purpose: the handler answers «not an agent endpoint
+// here» instead of leaking a control word into the peer's prompt. Same fleet-safety as the
+// lifecycle/stop parsers: any argument or trailing text fails.
+export function parseRuntimeSwitchCommand(text: string, candidates: readonly string[]): string | null {
+  const m = /^\/([a-z][a-z0-9]*)(?:@\w+)?$/.exec(text.trim().toLowerCase())
   if (!m) return null
-  return (RUNTIME_SWITCH_RUNTIMES as readonly string[]).includes(m[1]) ? m[1] : null
+  return candidates.includes(m[1]!) ? m[1]! : null
 }
 
 async function handleActivityCommand(
@@ -3105,7 +3133,17 @@ export async function handleRuntimeSwitchCommand(
   chatId: string,
   target: PeerRecord,
   toRuntime: string,
+  agentRuntimes: readonly string[],
 ): Promise<void> {
+  // Only a discovered agent endpoint is a switch target (docs/15): a declared runtime the
+  // running core cannot host, a channel runtime, or ANY runtime on a pre-discovery daemon.
+  if (!agentRuntimes.includes(toRuntime)) {
+    const offer = agentRuntimes.length ? agentRuntimes.join(', ') : 'none discovered'
+    await bot.api
+      .sendMessage(chatId, `${toRuntime} is not an agent endpoint of ${target.personality} on this core (agent: ${offer})`)
+      .catch(() => {})
+    return
+  }
   // No-op ONLY when <toRuntime> is already BOTH the default (target.runtime = default_runtime)
   // AND the live runtime. A peer live-on-X but default-still-Y still needs the persist, so the
   // live check alone is insufficient for the permanent-switch semantic.
@@ -3341,9 +3379,12 @@ async function handleInboundMessage(args: {
     // peer on the target runtime via `iapeer new <peer> <rt>`), intercepted before alias
     // expansion by the two-level contract. The soft, cooperative switch is an owner
     // `/alias_*` whose prompt does handoff → `iapeer default-runtime` → `iapeer self-fresh`.
-    const switchRuntime = parseRuntimeSwitchCommand(args.text)
+    const bareSlash = /^\/[a-z][a-z0-9]*(?:@\w+)?$/i.test(args.text.trim())
+    const agentRts = bareSlash ? await agentRuntimesFor(target.personality) : []
+    const declaredRts = target.runtimes?.length ? target.runtimes : [target.runtime]
+    const switchRuntime = bareSlash ? parseRuntimeSwitchCommand(args.text, [...declaredRts, ...agentRts]) : null
     if (switchRuntime) {
-      await handleRuntimeSwitchCommand(args.bot, args.ctx.ownerUserId, target, switchRuntime)
+      await handleRuntimeSwitchCommand(args.bot, args.ctx.ownerUserId, target, switchRuntime, agentRts)
       return
     }
   }
@@ -3497,6 +3538,7 @@ function commandDescription(text: string): string {
 export function buildBotCommands(
   target: PeerRecord,
   profile: PeerProfile | null,
+  agentRuntimes: readonly string[] = [],
 ): { command: string; description: string }[] {
   const cmds: { command: string; description: string }[] = [
     { command: 'new', description: 'restart the session (fresh, unconditional)' },
@@ -3504,11 +3546,9 @@ export function buildBotCommands(
     { command: 'stop', description: 'interrupt the current turn' },
     { command: 'activity', description: 'toggle the activity stream (on/off/status)' },
   ]
-  const declaredAgentRuntimes = (target.runtimes?.length ? target.runtimes : [target.runtime]).filter(rt =>
-    (RUNTIME_SWITCH_RUNTIMES as readonly string[]).includes(rt),
-  )
-  if (declaredAgentRuntimes.length >= 2) {
-    for (const rt of declaredAgentRuntimes) {
+  const switchable = agentRuntimes.filter(isValidCommandName)
+  if (switchable.length >= 2) {
+    for (const rt of switchable) {
       cmds.push({ command: rt, description: `switch this peer to ${rt} (restart)` })
     }
   }
@@ -3545,7 +3585,7 @@ async function syncBotCommands(ctx: RuntimeContext, botKey: string, bot: Bot): P
     } catch {
       // malformed profile → still register control + runtime-switch (aliases skipped)
     }
-    const commands = buildBotCommands(target, profile)
+    const commands = buildBotCommands(target, profile, await agentRuntimesFor(target.personality))
     const signature = JSON.stringify(commands)
     if (registeredCommands.get(botKey) === signature) return
     await bot.api.setMyCommands(commands, { scope: { type: 'chat', chat_id: Number(ctx.ownerUserId) } })

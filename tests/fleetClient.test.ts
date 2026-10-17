@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
+  agentEndpointsFromSnapshot,
   fleetAvailable,
   getApproval,
   getNotice,
@@ -278,5 +279,27 @@ describe('getNotice', () => {
     const { fetch, calls } = fakeFetch(200, { notice: LIVE_NOTICE })
     await getNotice('http://x', 'n 1/../x', { fetch, env: {} })
     expect(calls[0]!.url).toBe('http://x/fleet/v1/notices/n%201%2F..%2Fx')
+  })
+})
+
+describe('agentEndpointsFromSnapshot (docs/15 discovery)', () => {
+  const snap = (runtimes: unknown[]) => ({ peers: [{ personality: 'boris', runtimes }] })
+  test('offers exactly agent:true runtimes, declared order', () => {
+    expect(
+      agentEndpointsFromSnapshot(
+        snap([
+          { runtime: 'claude', status: 'live', agent: true },
+          { runtime: 'telegram', status: 'live', agent: false },
+          { runtime: 'opencode', status: 'asleep', agent: true },
+          { runtime: 'future', status: 'asleep', agent: false },
+        ]),
+        'boris',
+      ),
+    ).toEqual(['claude', 'opencode'])
+  })
+  test('pre-discovery daemon (no agent field) / unknown peer / junk → null', () => {
+    expect(agentEndpointsFromSnapshot(snap([{ runtime: 'claude', status: 'live' }]), 'boris')).toBeNull()
+    expect(agentEndpointsFromSnapshot(snap([{ runtime: 'claude', agent: true }]), 'linus')).toBeNull()
+    expect(agentEndpointsFromSnapshot(null, 'boris')).toBeNull()
   })
 })

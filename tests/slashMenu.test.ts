@@ -19,17 +19,21 @@ function peer(over: Record<string, unknown> = {}): any {
 }
 
 describe('parseRuntimeSwitchCommand', () => {
-  test('matches a bare known-runtime command (with optional @botname, case-insensitive)', () => {
-    expect(parseRuntimeSwitchCommand('/claude')).toBe('claude')
-    expect(parseRuntimeSwitchCommand('/codex')).toBe('codex')
-    expect(parseRuntimeSwitchCommand('/codex@boris_claudecode_bot')).toBe('codex')
-    expect(parseRuntimeSwitchCommand('  /Claude  ')).toBe('claude')
+  const cand = ['claude', 'codex', 'opencode']
+  test('matches a bare candidate runtime (with optional @botname, case-insensitive)', () => {
+    expect(parseRuntimeSwitchCommand('/claude', cand)).toBe('claude')
+    expect(parseRuntimeSwitchCommand('/codex', cand)).toBe('codex')
+    expect(parseRuntimeSwitchCommand('/opencode', cand)).toBe('opencode')
+    expect(parseRuntimeSwitchCommand('/codex@boris_claudecode_bot', cand)).toBe('codex')
+    expect(parseRuntimeSwitchCommand('  /Claude  ', cand)).toBe('claude')
   })
 
-  test('does NOT match control commands, unknown words, or anything with trailing text', () => {
+  test('does NOT match control commands, non-candidates, or anything with trailing text', () => {
     for (const t of ['/new', '/compact', '/stop', '/activity', '/runtime', '/claudex', 'codex', '/codex now', '/alias_new']) {
-      expect(parseRuntimeSwitchCommand(t)).toBeNull()
+      expect(parseRuntimeSwitchCommand(t, cand)).toBeNull()
     }
+    expect(parseRuntimeSwitchCommand('/opencode', ['claude', 'codex'])).toBeNull() // no hardcode: list-driven
+    expect(parseRuntimeSwitchCommand('/claude', [])).toBeNull()
   })
 })
 
@@ -41,14 +45,13 @@ describe('buildBotCommands', () => {
     expect(names(cmds)).toEqual(['new', 'compact', 'stop', 'activity'])
   })
 
-  test('runtime-switch commands appear only when ≥2 declared agent runtimes, one per runtime', () => {
-    const cmds = buildBotCommands(peer({ runtimes: ['claude', 'codex'] }), null)
-    expect(names(cmds)).toContain('claude')
-    expect(names(cmds)).toContain('codex')
-    // a non-agent runtime (telegram) is never a switch target
-    const mixed = buildBotCommands(peer({ runtimes: ['claude', 'telegram'] }), null)
-    expect(names(mixed)).not.toContain('telegram')
-    expect(names(mixed)).not.toContain('claude') // only 1 AGENT runtime declared → no switch
+  test('runtime-switch commands come from discovered agent endpoints only, when ≥2', () => {
+    const cmds = buildBotCommands(peer({ runtimes: ['claude', 'codex', 'opencode'] }), null, ['claude', 'codex', 'opencode'])
+    expect(names(cmds)).toEqual(['new', 'compact', 'stop', 'activity', 'claude', 'codex', 'opencode'])
+    // declared but not discovered (pre-discovery daemon → []) → no switch offered
+    expect(names(buildBotCommands(peer({ runtimes: ['claude', 'codex'] }), null, []))).toEqual(['new', 'compact', 'stop', 'activity'])
+    // a single agent endpoint is no choice
+    expect(names(buildBotCommands(peer(), null, ['claude']))).not.toContain('claude')
   })
 
   test('aliases (canonical expansion.aliases) are included with the slash stripped + a description', () => {

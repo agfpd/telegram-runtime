@@ -313,3 +313,32 @@ export async function resolveApproval(
   if (!resp.ok) throw new Error(`POST /fleet/v1/approvals/${id}/${action} → ${resp.status}`)
   return 'ok'
 }
+
+// ── Agent-endpoint discovery (docs/15, iapeer 2197de5) ────────────────────────
+
+export const SNAPSHOT_PATH = '/fleet/v1/snapshot'
+
+/** Pure: the personality's offerable agent endpoints from a parsed /fleet/v1/snapshot —
+ *  exactly its `runtimes[].agent === true` entries, in declared order. NULL means the
+ *  snapshot carries NO discovery for this peer (pre-discovery daemon omits `agent`, or
+ *  the peer is absent): per docs/15 the client then offers NO runtime — never a local
+ *  runtime list, never a PATH probe. */
+export function agentEndpointsFromSnapshot(snapshot: unknown, personality: string): string[] | null {
+  const peers = (snapshot as { peers?: unknown } | null)?.peers
+  if (!Array.isArray(peers)) return null
+  const peer = peers.find(p => (p as { personality?: unknown })?.personality === personality) as
+    | { runtimes?: unknown }
+    | undefined
+  if (!peer || !Array.isArray(peer.runtimes)) return null
+  const rts = peer.runtimes as { runtime?: unknown; agent?: unknown }[]
+  if (!rts.some(r => typeof r?.agent === 'boolean')) return null
+  return rts.filter(r => r?.agent === true && typeof r.runtime === 'string').map(r => r.runtime as string)
+}
+
+/** GET /fleet/v1/snapshot → the parsed body. THROWS on transport failure / non-200. */
+export async function getFleetSnapshot(base: string, deps: FleetClientDeps = {}): Promise<unknown> {
+  const env = deps.env ?? process.env
+  const resp = await fleetFetch(`${base}${SNAPSHOT_PATH}`, { method: 'GET', headers: headers(env) }, deps)
+  if (!resp.ok) throw new Error(`GET ${SNAPSHOT_PATH} → ${resp.status}`)
+  return resp.json()
+}
