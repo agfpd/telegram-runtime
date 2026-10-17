@@ -318,21 +318,36 @@ export async function resolveApproval(
 
 export const SNAPSHOT_PATH = '/fleet/v1/snapshot'
 
-/** Pure: the personality's offerable agent endpoints from a parsed /fleet/v1/snapshot —
- *  exactly its `runtimes[].agent === true` entries, in declared order. NULL means the
- *  snapshot carries NO discovery for this peer (pre-discovery daemon omits `agent`, or
- *  the peer is absent): per docs/15 the client then offers NO runtime — never a local
- *  runtime list, never a PATH probe. */
-export function agentEndpointsFromSnapshot(snapshot: unknown, personality: string): string[] | null {
-  const peers = (snapshot as { peers?: unknown } | null)?.peers
-  if (!Array.isArray(peers)) return null
+/** Minimum core that serves agent-endpoint discovery (docs/15, iapeer 2197de5). */
+export const DISCOVERY_MIN_IAPEER = '0.4.115'
+
+/** Discovery result, THREE-VALUED like SurfaceState and for the same reason:
+ *  - `ok`         the core reports discovery; `runtimes` = the peer's `agent: true`
+ *                 runtimes in declared order ([] for an unknown peer / none hostable).
+ *  - `absent`     the core ANSWERED without `host.agent_runtimes` — a pre-0.4.115 core,
+ *                 or a rollback to one. Per docs/15 nothing is offered, but this must be
+ *                 SAID to the owner, never rendered as a silently empty menu.
+ *  - `unreachable` nobody answered — says nothing about the core's version. */
+export type AgentDiscovery =
+  | { state: 'ok'; runtimes: string[] }
+  | { state: 'absent' }
+  | { state: 'unreachable' }
+
+/** Pure: discovery for one personality from a parsed /fleet/v1/snapshot. The DAEMON-level
+ *  signal `host.agent_runtimes` decides absent vs ok; the per-runtime `agent` flag decides
+ *  what is offered — never a local runtime list, never a PATH probe. */
+export function agentDiscoveryFromSnapshot(snapshot: unknown, personality: string): AgentDiscovery {
+  const snap = snapshot as { host?: { agent_runtimes?: unknown }; peers?: unknown } | null
+  if (!snap || !Array.isArray(snap.host?.agent_runtimes)) return { state: 'absent' }
+  const peers = Array.isArray(snap.peers) ? snap.peers : []
   const peer = peers.find(p => (p as { personality?: unknown })?.personality === personality) as
     | { runtimes?: unknown }
     | undefined
-  if (!peer || !Array.isArray(peer.runtimes)) return null
-  const rts = peer.runtimes as { runtime?: unknown; agent?: unknown }[]
-  if (!rts.some(r => typeof r?.agent === 'boolean')) return null
-  return rts.filter(r => r?.agent === true && typeof r.runtime === 'string').map(r => r.runtime as string)
+  const rts = Array.isArray(peer?.runtimes) ? (peer!.runtimes as { runtime?: unknown; agent?: unknown }[]) : []
+  return {
+    state: 'ok',
+    runtimes: rts.filter(r => r?.agent === true && typeof r.runtime === 'string').map(r => r.runtime as string),
+  }
 }
 
 /** GET /fleet/v1/snapshot → the parsed body. THROWS on transport failure / non-200. */

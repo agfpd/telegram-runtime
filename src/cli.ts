@@ -22,7 +22,9 @@ import { selfInstall } from './selfInstall.ts'
 import { runSelfConfig } from './selfConfig.ts'
 import {
   APPROVALS_PATH,
-  agentEndpointsFromSnapshot,
+  agentDiscoveryFromSnapshot,
+  type AgentDiscovery,
+  DISCOVERY_MIN_IAPEER,
   fleetAvailable,
   getFleetSnapshot,
   listApprovals,
@@ -2891,14 +2893,23 @@ async function fleetSnapshotCached(): Promise<unknown> {
     })
   return agentRtInflight
 }
-/** Offerable agent endpoints for a personality; [] when undiscoverable or the daemon is
- *  unreachable (a menu/control convenience must never throw into delivery). */
-export async function agentRuntimesFor(personality: string): Promise<string[]> {
+/** Agent-endpoint discovery for a personality (see AgentDiscovery). Never throws: a
+ *  menu/control convenience must never break delivery. */
+export async function discoverAgentRuntimes(personality: string): Promise<AgentDiscovery> {
   try {
-    return agentEndpointsFromSnapshot(await fleetSnapshotCached(), personality) ?? []
+    return agentDiscoveryFromSnapshot(await fleetSnapshotCached(), personality)
   } catch {
-    return []
+    return { state: 'unreachable' }
   }
+}
+
+/** Owner-facing line when switching cannot be offered. The pre-discovery wording is the
+ *  product-level anchor for the release dependency (boris 17.10.2026): a core rollback
+ *  must surface as this message, not as /claude and /codex silently vanishing. */
+export function runtimeSwitchUnavailableText(d: AgentDiscovery): string | null {
+  if (d.state === 'absent') return `переключение рантаймов требует iapeer ≥ ${DISCOVERY_MIN_IAPEER} (ядро на хосте не сообщает agent-рантаймы)`
+  if (d.state === 'unreachable') return 'переключение рантаймов недоступно: ядро iapeer не отвечает'
+  return null
 }
 
 // Parse a hard runtime-switch control command: a BARE `/<runtime>` (optionally with
@@ -3133,10 +3144,30 @@ export async function handleRuntimeSwitchCommand(
   chatId: string,
   target: PeerRecord,
   toRuntime: string,
-  agentRuntimes: readonly string[],
+  discovery: AgentDiscovery,
 ): Promise<void> {
+  const unavailable = runtimeSwitchUnavailableText(discovery)
+  if (unavailable) {
+    logActivity('runtime-switch-unavailable', {
+      peer: target.personality,
+      runtime: toRuntime,
+      discovery: discovery.state,
+      need: DISCOVERY_MIN_IAPEER,
+    })
+    await bot.api.sendMessage(chatId, unavailable).catch(() => {})
+    return
+  }
+  const agentRuntimes = discovery.state === 'ok' ? discovery.runtimes : []
+  // `/runtime` is the informational entry: list what can be switched to.
+  if (toRuntime === 'runtime') {
+    const list = agentRuntimes.length ? agentRuntimes.map(r => `/${r}`).join(' ') : 'нет'
+    await bot.api
+      .sendMessage(chatId, `${target.personality}: рантайм по умолчанию ${target.runtime}; переключение: ${list}`)
+      .catch(() => {})
+    return
+  }
   // Only a discovered agent endpoint is a switch target (docs/15): a declared runtime the
-  // running core cannot host, a channel runtime, or ANY runtime on a pre-discovery daemon.
+  // running core cannot host, or a channel runtime.
   if (!agentRuntimes.includes(toRuntime)) {
     const offer = agentRuntimes.length ? agentRuntimes.join(', ') : 'none discovered'
     await bot.api
@@ -3380,11 +3411,14 @@ async function handleInboundMessage(args: {
     // expansion by the two-level contract. The soft, cooperative switch is an owner
     // `/alias_*` whose prompt does handoff → `iapeer default-runtime` → `iapeer self-fresh`.
     const bareSlash = /^\/[a-z][a-z0-9]*(?:@\w+)?$/i.test(args.text.trim())
-    const agentRts = bareSlash ? await agentRuntimesFor(target.personality) : []
+    const discovery: AgentDiscovery = bareSlash ? await discoverAgentRuntimes(target.personality) : { state: 'ok', runtimes: [] }
+    const agentRts = discovery.state === 'ok' ? discovery.runtimes : []
     const declaredRts = target.runtimes?.length ? target.runtimes : [target.runtime]
-    const switchRuntime = bareSlash ? parseRuntimeSwitchCommand(args.text, [...declaredRts, ...agentRts]) : null
+    const switchRuntime = bareSlash
+      ? parseRuntimeSwitchCommand(args.text, ['runtime', ...declaredRts, ...agentRts])
+      : null
     if (switchRuntime) {
-      await handleRuntimeSwitchCommand(args.bot, args.ctx.ownerUserId, target, switchRuntime, agentRts)
+      await handleRuntimeSwitchCommand(args.bot, args.ctx.ownerUserId, target, switchRuntime, discovery)
       return
     }
   }
@@ -3538,7 +3572,7 @@ function commandDescription(text: string): string {
 export function buildBotCommands(
   target: PeerRecord,
   profile: PeerProfile | null,
-  agentRuntimes: readonly string[] = [],
+  discovery: AgentDiscovery = { state: 'ok', runtimes: [] },
 ): { command: string; description: string }[] {
   const cmds: { command: string; description: string }[] = [
     { command: 'new', description: 'restart the session (fresh, unconditional)' },
@@ -3546,11 +3580,16 @@ export function buildBotCommands(
     { command: 'stop', description: 'interrupt the current turn' },
     { command: 'activity', description: 'toggle the activity stream (on/off/status)' },
   ]
-  const switchable = agentRuntimes.filter(isValidCommandName)
+  const switchable = discovery.state === 'ok' ? discovery.runtimes.filter(isValidCommandName) : []
+  const declaredCount = (target.runtimes?.length ? target.runtimes : [target.runtime]).length
   if (switchable.length >= 2) {
     for (const rt of switchable) {
       cmds.push({ command: rt, description: `switch this peer to ${rt} (restart)` })
     }
+  } else if (discovery.state === 'absent' && declaredCount >= 2) {
+    // Pre-discovery core: no switch can be offered (docs/15), but a multi-runtime peer
+    // gets ONE explanatory entry instead of a silently shrunken menu.
+    cmds.push({ command: 'runtime', description: `runtime switch — requires iapeer ≥ ${DISCOVERY_MIN_IAPEER}` })
   }
   const aliases = resolveAliases(profile)
   if (aliases) {
@@ -3585,7 +3624,14 @@ async function syncBotCommands(ctx: RuntimeContext, botKey: string, bot: Bot): P
     } catch {
       // malformed profile → still register control + runtime-switch (aliases skipped)
     }
-    const commands = buildBotCommands(target, profile, await agentRuntimesFor(target.personality))
+    const discovery = await discoverAgentRuntimes(target.personality)
+    // Daemon not answering says nothing about its version: keep the last registered menu
+    // rather than rewriting it from no information.
+    if (discovery.state === 'unreachable' && registeredCommands.has(botKey)) return
+    if (discovery.state === 'absent') {
+      logActivity('runtime-discovery-absent', { bot: botKey, peer: target.personality, need: DISCOVERY_MIN_IAPEER })
+    }
+    const commands = buildBotCommands(target, profile, discovery)
     const signature = JSON.stringify(commands)
     if (registeredCommands.get(botKey) === signature) return
     await bot.api.setMyCommands(commands, { scope: { type: 'chat', chat_id: Number(ctx.ownerUserId) } })

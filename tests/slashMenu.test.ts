@@ -4,7 +4,7 @@
 // live setMyCommands call are covered by the live demo, not here.
 
 import { describe, expect, test } from 'bun:test'
-import { buildBotCommands, parseRuntimeSwitchCommand } from '../src/cli.ts'
+import { buildBotCommands, parseRuntimeSwitchCommand, runtimeSwitchUnavailableText } from '../src/cli.ts'
 
 function peer(over: Record<string, unknown> = {}): any {
   return {
@@ -46,12 +46,25 @@ describe('buildBotCommands', () => {
   })
 
   test('runtime-switch commands come from discovered agent endpoints only, when ≥2', () => {
-    const cmds = buildBotCommands(peer({ runtimes: ['claude', 'codex', 'opencode'] }), null, ['claude', 'codex', 'opencode'])
+    const ok = (runtimes: string[]) => ({ state: 'ok' as const, runtimes })
+    const cmds = buildBotCommands(peer({ runtimes: ['claude', 'codex', 'opencode'] }), null, ok(['claude', 'codex', 'opencode']))
     expect(names(cmds)).toEqual(['new', 'compact', 'stop', 'activity', 'claude', 'codex', 'opencode'])
-    // declared but not discovered (pre-discovery daemon → []) → no switch offered
-    expect(names(buildBotCommands(peer({ runtimes: ['claude', 'codex'] }), null, []))).toEqual(['new', 'compact', 'stop', 'activity'])
-    // a single agent endpoint is no choice
-    expect(names(buildBotCommands(peer(), null, ['claude']))).not.toContain('claude')
+    // declared but not hostable on this core → not offered
+    expect(names(buildBotCommands(peer({ runtimes: ['claude', 'codex'] }), null, ok(['claude'])))).toEqual(['new', 'compact', 'stop', 'activity'])
+  })
+
+  test('pre-discovery core: ONE explanatory /runtime entry instead of a silently shrunken menu', () => {
+    const cmds = buildBotCommands(peer({ runtimes: ['claude', 'codex'] }), null, { state: 'absent' })
+    expect(names(cmds)).toEqual(['new', 'compact', 'stop', 'activity', 'runtime'])
+    expect(cmds.at(-1)!.description).toContain('0.4.115')
+    // single-runtime peer: nothing to explain
+    expect(names(buildBotCommands(peer({ runtimes: ['claude'] }), null, { state: 'absent' }))).not.toContain('runtime')
+  })
+
+  test('unavailable text: absent names the required core, unreachable says so, ok is null', () => {
+    expect(runtimeSwitchUnavailableText({ state: 'absent' })).toContain('iapeer ≥ 0.4.115')
+    expect(runtimeSwitchUnavailableText({ state: 'unreachable' })).toContain('не отвечает')
+    expect(runtimeSwitchUnavailableText({ state: 'ok', runtimes: [] })).toBeNull()
   })
 
   test('aliases (canonical expansion.aliases) are included with the slash stripped + a description', () => {

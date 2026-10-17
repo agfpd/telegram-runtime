@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
-  agentEndpointsFromSnapshot,
+  agentDiscoveryFromSnapshot,
   fleetAvailable,
   getApproval,
   getNotice,
@@ -282,11 +282,14 @@ describe('getNotice', () => {
   })
 })
 
-describe('agentEndpointsFromSnapshot (docs/15 discovery)', () => {
-  const snap = (runtimes: unknown[]) => ({ peers: [{ personality: 'boris', runtimes }] })
+describe('agentDiscoveryFromSnapshot (docs/15 discovery)', () => {
+  const snap = (runtimes: unknown[], host: unknown = { agent_runtimes: ['claude', 'codex', 'opencode'] }) => ({
+    host,
+    peers: [{ personality: 'boris', runtimes }],
+  })
   test('offers exactly agent:true runtimes, declared order', () => {
     expect(
-      agentEndpointsFromSnapshot(
+      agentDiscoveryFromSnapshot(
         snap([
           { runtime: 'claude', status: 'live', agent: true },
           { runtime: 'telegram', status: 'live', agent: false },
@@ -295,11 +298,13 @@ describe('agentEndpointsFromSnapshot (docs/15 discovery)', () => {
         ]),
         'boris',
       ),
-    ).toEqual(['claude', 'opencode'])
+    ).toEqual({ state: 'ok', runtimes: ['claude', 'opencode'] })
   })
-  test('pre-discovery daemon (no agent field) / unknown peer / junk → null', () => {
-    expect(agentEndpointsFromSnapshot(snap([{ runtime: 'claude', status: 'live' }]), 'boris')).toBeNull()
-    expect(agentEndpointsFromSnapshot(snap([{ runtime: 'claude', agent: true }]), 'linus')).toBeNull()
-    expect(agentEndpointsFromSnapshot(null, 'boris')).toBeNull()
+  test('pre-discovery core (no host.agent_runtimes — live 0.4.114 shape) → absent', () => {
+    expect(agentDiscoveryFromSnapshot(snap([{ runtime: 'claude', status: 'live' }], { fda: true }), 'boris')).toEqual({ state: 'absent' })
+    expect(agentDiscoveryFromSnapshot(null, 'boris')).toEqual({ state: 'absent' })
+  })
+  test('discovery-capable core, unknown peer → ok with nothing offered', () => {
+    expect(agentDiscoveryFromSnapshot(snap([{ runtime: 'claude', agent: true }]), 'linus')).toEqual({ state: 'ok', runtimes: [] })
   })
 })

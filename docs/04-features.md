@@ -30,7 +30,7 @@ The bridge intercepts these commands and executes them through iapeer, without d
 
 ## Runtime switch
 
-An agent can be declared on more than one runtime (Claude, Codex, OpenCode, …). When it is, the bridge offers a switch straight from the chat: `/claude`, `/codex`, `/opencode` moves that agent onto the named runtime for its next turns. The list comes from the iapeer core itself — exactly the runtimes it reports as agent endpoints this core can host — so the option appears only when there are two or more of them. A core too old to report this offers no switch at all.
+An agent can be declared on more than one runtime (Claude, Codex, OpenCode, …). When it is, the bridge offers a switch straight from the chat: `/claude`, `/codex`, `/opencode` moves that agent onto the named runtime for its next turns. The list comes from the iapeer core itself — exactly the runtimes it reports as agent endpoints this core can host — so the option appears only when there are two or more of them. A core too old to report this (before iapeer 0.4.115) offers no switch: the menu shows a single `/runtime` entry instead, and `/runtime`, `/claude` or `/codex` answers that switching requires iapeer ≥ 0.4.115. `/runtime` on a current core lists what can be switched to.
 
 ## Alias shortcuts
 
