@@ -1,0 +1,103 @@
+name: Publish
+
+# Publishes @agfpd/telegram-runtime to npm via trusted publishing (OIDC) — no stored
+# token, no OTP, no browser. npmjs.com trusted-publisher config must name this file:
+# agfpd / telegram-runtime / publish.yml.
+#
+# EXACT-BYTES INVARIANT: the registry receives exactly the archive the PM accepted, never
+# a CI rebuild. The bytes come from the GitHub Release asset of the tag
+# (agfpd-telegram-runtime-<version>.tgz) and must hash to the `sha256` input — the PM's
+# acceptance hash. Any mismatch fails the run before `npm publish`. Hence dispatch-only:
+# a bare tag push carries no accepted hash.
+#
+# Dispatch from main (`gh workflow run publish.yml --ref main -f tag=… -f sha256=…`): the
+# workflow file is main's, the tag is checked out for the test gate. The OIDC claim names
+# this file, which is what the trusted-publisher config matches.
+#
+# Provenance needs package.json `repository.url` == this repo. An archive accepted
+# without it (0.28.4) is published with provenance OFF rather than rebuilt — rebuilding
+# would break the invariant. Archives that carry the field get provenance.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag whose Release asset is published (e.g. v0.28.4)'
+        required: true
+      sha256:
+        description: 'SHA-256 of the PM-accepted archive (64 hex)'
+        required: true
+
+permissions:
+  id-token: write # OIDC for npm trusted publishing
+  contents: read # checkout + release asset download
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    env:
+      TAG: ${{ inputs.tag }}
+      WANT_SHA256: ${{ inputs.sha256 }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate inputs
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad tag: $TAG" >&2; exit 1; }
+          [[ "$WANT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "sha256 must be 64 lowercase hex" >&2; exit 1; }
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false # never cache in release builds
+      - run: npm install -g npm@latest # trusted publishing needs npm >= 11.5.1
+      - name: Tag matches package.json version
+        run: |
+          ver="v$(node -p "require('./package.json').version")"
+          [ "$TAG" = "$ver" ] || { echo "tag $TAG != package.json $ver" >&2; exit 1; }
+      - name: Test gate on the tagged source
+        run: |
+          bun install --frozen-lockfile
+          bun run test
+          bun run typecheck
+      - name: Fetch the accepted archive and verify its bytes
+        run: |
+          ver="${TAG#v}"
+          asset="agfpd-telegram-runtime-${ver}.tgz"
+          mkdir -p "$RUNNER_TEMP/release"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir "$RUNNER_TEMP/release"
+          tgz="$RUNNER_TEMP/release/$asset"
+          got="$(shasum -a 256 "$tgz" | cut -d' ' -f1)"
+          echo "archive sha256: $got"
+          [ "$got" = "$WANT_SHA256" ] || { echo "archive sha256 $got != accepted $WANT_SHA256 — refusing to publish" >&2; exit 1; }
+          meta="$(tar -xzOf "$tgz" package/package.json)"
+          name="$(node -e 'const p=JSON.parse(process.argv[1]);process.stdout.write(p.name)' "$meta")"
+          pver="$(node -e 'const p=JSON.parse(process.argv[1]);process.stdout.write(p.version)' "$meta")"
+          repo="$(node -e 'const p=JSON.parse(process.argv[1]);const r=p.repository;process.stdout.write(typeof r==="string"?r:(r&&r.url)||"")' "$meta")"
+          [ "$name" = "@agfpd/telegram-runtime" ] || { echo "archive name $name" >&2; exit 1; }
+          [ "v$pver" = "$TAG" ] || { echo "archive version $pver != $TAG" >&2; exit 1; }
+          if [ "$repo" = "git+https://github.com/${GITHUB_REPOSITORY}.git" ]; then prov=true; else prov=false; fi
+          echo "repository.url in archive: '${repo}' → provenance=$prov"
+          echo "TGZ=$tgz" >> "$GITHUB_ENV"
+          echo "VER=$ver" >> "$GITHUB_ENV"
+          echo "NPM_CONFIG_PROVENANCE=$prov" >> "$GITHUB_ENV"
+          echo "WANT_INTEGRITY=sha512-$(openssl dgst -sha512 -binary "$tgz" | base64 | tr -d '\n')" >> "$GITHUB_ENV"
+      - name: Publish the exact archive
+        run: npm publish "$TGZ" --access public
+      - name: Registry integrity equals the accepted archive
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            got="$(npm view "@agfpd/telegram-runtime@$VER" dist.integrity 2>/dev/null || true)"
+            [ -n "$got" ] && break
+            sleep 10
+          done
+          echo "registry integrity: $got"
+          echo "accepted integrity: $WANT_INTEGRITY"
+          [ "$got" = "$WANT_INTEGRITY" ] || { echo "registry integrity mismatch" >&2; exit 1; }
