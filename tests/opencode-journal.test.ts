@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { createOpencodeJournalParser, opencodeStateBusy, opencodeToolName } from '../src/cli'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 // Consumer of the core-produced OpenCode journal (iapeer docs/20 «Observability
 // ABI»). Fixtures follow the native OpenCode 1.19.3 ToolPart / AssistantMessage
@@ -81,4 +83,46 @@ describe('opencodeStateBusy', () => {
 test('opencodeToolName', () => {
   expect(opencodeToolName('iapeer_send_to_peer')).toBe('send_to_peer')
   expect(opencodeToolName('bash')).toBe('bash')
+})
+
+// Real producer output: iapeer c11d6e4 `scripts/opencode-native-harness.ts --keep`
+// (OpenCode 1.19.3 serve, synthetic provider, fresh → 2 deliveries → interrupt →
+// resume). The synthetic provider makes NO tool calls, so this proves the ABI
+// envelope, seq handling and token extraction against the live producer — tool
+// gestures stay unit-only until a tool-calling harness run exists.
+describe('replay of the real core-produced journal (iapeer c11d6e4 harness)', () => {
+  const lines = readFileSync(join(import.meta.dir, 'fixtures/opencode-harness-c11d6e4.events.jsonl'), 'utf8')
+    .split('\n').filter(Boolean).map(l => JSON.parse(l))
+
+  test('every line is accepted by the ABI envelope gate, seq contiguous across resume', () => {
+    expect(lines.length).toBe(80)
+    lines.forEach((o, i) => expect(o.seq).toBe(i + 1))
+    const p = createOpencodeJournalParser()
+    let accepted = 0
+    let lastTokens: number | null = null
+    for (const o of lines) {
+      expect(p.events(o)).toEqual([]) // no tool parts in this run
+      const t = p.tokens(o)
+      if (t !== null) { accepted++; lastTokens = t }
+    }
+    expect(accepted).toBeGreaterThan(0)
+    expect(lastTokens).toBe(10) // synthetic provider: prompt_tokens 10
+  })
+
+  test('a full second pass (reader re-tail from byte 0) is fully deduped by seq', () => {
+    const p = createOpencodeJournalParser()
+    for (const o of lines) { p.events(o); p.tokens(o) }
+    for (const o of lines) {
+      expect(p.events(o)).toEqual([])
+      expect(p.tokens(o)).toBeNull()
+    }
+  })
+
+  test('state.json shape is read by the busy gate', () => {
+    const st = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures/opencode-harness-c11d6e4.state.json'), 'utf8'))
+    expect(st.schema).toBe(1)
+    // The harness SIGTERMs mid-turn: dispose does not run on a signal (docs/20), so the
+    // file is left `busy`. The state file alone cannot end that turn — see liveness.
+    expect(opencodeStateBusy(st)).toBe(true)
+  })
 })
