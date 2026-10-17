@@ -92,12 +92,17 @@ jobs:
       - name: Publish the exact archive
         run: npm publish "$TGZ" --access public
       - name: Registry integrity equals the accepted archive
+        # The registry replicates with lag: on 0.28.5 the per-version view 404'd for >2 min
+        # after a successful publish. Poll the packument for up to 10 min; absence after
+        # that is a failure, a present-but-different integrity fails immediately.
         run: |
-          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            got="$(npm view "@agfpd/telegram-runtime@$VER" dist.integrity 2>/dev/null || true)"
+          got=""
+          for i in $(seq 1 60); do
+            got="$(curl -fsSL "https://registry.npmjs.org/@agfpd%2ftelegram-runtime" 2>/dev/null \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s).versions[process.argv[1]];process.stdout.write(v?.dist?.integrity??"")}catch{}})' "$VER" || true)"
             [ -n "$got" ] && break
             sleep 10
           done
           echo "registry integrity: $got"
           echo "accepted integrity: $WANT_INTEGRITY"
-          [ "$got" = "$WANT_INTEGRITY" ] || { echo "registry integrity mismatch" >&2; exit 1; }
+          [ "$got" = "$WANT_INTEGRITY" ] || { echo "registry integrity mismatch or version absent after 10 min" >&2; exit 1; }
