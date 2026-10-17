@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createOpencodeJournalParser, opencodeStateBusy, opencodeToolName } from '../src/cli'
+import { createOpencodeJournalParser, opencodeDir, opencodeStateBusy, opencodeToolName } from '../src/cli'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -125,4 +125,15 @@ describe('replay of the real core-produced journal (iapeer c11d6e4 harness)', ()
     // file is left `busy`. The state file alone cannot end that turn — see liveness.
     expect(opencodeStateBusy(st)).toBe(true)
   })
+})
+
+test('opencodeDir follows the docs/20 path <IAPEER_ROOT>/state/opencode/<p>', () => {
+  const prev = process.env.IAPEER_ROOT
+  process.env.IAPEER_ROOT = '/tmp/iap-root'
+  try {
+    expect(opencodeDir({ personality: 'probe' } as any)).toBe('/tmp/iap-root/state/opencode/probe')
+  } finally {
+    if (prev === undefined) delete process.env.IAPEER_ROOT
+    else process.env.IAPEER_ROOT = prev
+  }
 })

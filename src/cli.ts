@@ -2305,16 +2305,17 @@ export function activeTranscriptPath(target: PeerRecord, rt: string = liveRuntim
 }
 
 // ─── OpenCode observability (docs/20 «Observability ABI», iapeer 17.10.2026) ──
-// The core is the SINGLE producer: `<IAPEER_ROOT>/peers/<p>/opencode/events.jsonl`
+// The core is the SINGLE producer: `<IAPEER_ROOT>/state/opencode/<p>/events.jsonl`
 // (append-only, never rotated, `seq` monotonic across resumes; native OpenCode
 // events passed through unchanged) and an atomically-written `state.json` whose
 // `status` is the busy/idle truth (NOT the pane-log mtime). We read only these —
 // never OpenCode's SQLite DB nor a second SDK client. Per-personality paths: two
-// personalities may share one cwd. STATUS: the core producer is not yet shipped;
-// this consumer is unit-tested against the native OpenCode 1.19.3 part schema,
-// not yet proven against a live producer.
+// personalities may share one cwd. Path moved from <root>/peers/<p>/opencode/ to
+// <root>/state/opencode/<p>/ before the adapter's first release (iapeer 17.10.2026, no
+// migration — the old path never shipped). Replayed against the real producer output
+// (iapeer c11d6e4 native harness, tests/fixtures); tool gestures still unit-only.
 export function opencodeDir(target: PeerRecord): string {
-  return join(iapeerRoot(), 'peers', target.personality, 'opencode')
+  return join(iapeerRoot(), 'state', 'opencode', target.personality)
 }
 function opencodeEventsPath(target: PeerRecord): string | null {
   const p = join(opencodeDir(target), 'events.jsonl')
