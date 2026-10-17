@@ -137,3 +137,26 @@ test('opencodeDir follows the docs/20 path <IAPEER_ROOT>/state/opencode/<p>', ()
     else process.env.IAPEER_ROOT = prev
   }
 })
+
+// Real producer output WITH tool calls: iapeer 30e6b13 `scripts/opencode-mcp-harness.ts
+// --keep`, sender `ocsend` (native bash, then iapeer_send_to_peer → ocrecv). Proves the
+// gesture path against the live producer: pending→running→completed upserted to ONE
+// gesture per part id, MCP name normalised, operator-bound sends hidden.
+describe('replay of the real core-produced journal with tool calls (iapeer 30e6b13)', () => {
+  const lines = readFileSync(join(import.meta.dir, 'fixtures/opencode-mcp-30e6b13.events.jsonl'), 'utf8')
+    .split('\n').filter(Boolean).map(l => JSON.parse(l))
+  const run = (isOp?: (p: string) => boolean) => {
+    const p = createOpencodeJournalParser(isOp)
+    return lines.flatMap(o => p.events(o))
+  }
+  test('one gesture per tool part, agent→agent send kept', () => {
+    expect(run(x => x === 'arthur')).toEqual([
+      { tool: 'bash', label: 'write marker' },
+      { tool: 'send_to_peer', label: 'ocrecv' },
+    ])
+  })
+  test('operator-bound send is hidden; no classifier → hidden (fail-safe)', () => {
+    expect(run(x => x === 'ocrecv')).toEqual([{ tool: 'bash', label: 'write marker' }])
+    expect(run()).toEqual([{ tool: 'bash', label: 'write marker' }])
+  })
+})
