@@ -1386,6 +1386,30 @@ export function parseIapSendWoke(stdout: string): boolean | undefined {
   return undefined
 }
 
+// Parse the runtime the core ACTUALLY delivered to from a successful `iapeer send`:
+// the JSON result `{"ok":true,"delivered_to":{"personality":…,"runtime":…},…}` or the
+// CLI text `delivered to <p> (<rt>)` / `queued for <p> (<rt>), depth N`. This is the
+// authoritative endpoint for the turn's activity (docs/20 «Endpoint selection»): with
+// two live runtimes of one personality, neither the freshest pane-log nor
+// `live-runtime` may pick the endpoint — the delivery answer does. Returns undefined
+// when stdout carries no recognizable delivery line.
+export function parseIapSendDeliveredRuntime(stdout: string): string | undefined {
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    if (line.startsWith('{') && line.endsWith('}')) {
+      try {
+        const obj = JSON.parse(line) as { delivered_to?: { runtime?: unknown } }
+        const rt = obj.delivered_to?.runtime
+        if (typeof rt === 'string' && rt) return rt
+      } catch {}
+    }
+    const m = /^(?:delivered to|queued for)\s+\S+\s+\(([a-z][a-z0-9]{0,31})\)/.exec(line)
+    if (m) return m[1]
+  }
+  return undefined
+}
+
 function formatTimeoutSeconds(ms: number): number {
   return Math.max(1, Math.ceil(ms / 1000))
 }
@@ -2269,8 +2293,129 @@ function codexTranscriptPath(cwd: string): string | null {
 export function activeTranscriptPath(target: PeerRecord, rt: string = liveRuntime(target)): string | null {
   if (!target.cwd) return null
   if (rt === 'codex') return codexTranscriptPath(target.cwd)
-  // claude (and any future runtime writing Claude-style JSONL projects)
-  return claudeTranscriptPath(target.cwd)
+  if (rt === 'claude') return claudeTranscriptPath(target.cwd)
+  if (rt === 'opencode') return opencodeEventsPath(target)
+  // Unknown runtimes must never borrow Claude's transcript from a shared cwd.
+  // Each runtime needs an explicit, owner-agreed observation contract.
+  return null
+}
+
+// ─── OpenCode observability (docs/20 «Observability ABI», iapeer 17.10.2026) ──
+// The core is the SINGLE producer: `<IAPEER_ROOT>/peers/<p>/opencode/events.jsonl`
+// (append-only, never rotated, `seq` monotonic across resumes; native OpenCode
+// events passed through unchanged) and an atomically-written `state.json` whose
+// `status` is the busy/idle truth (NOT the pane-log mtime). We read only these —
+// never OpenCode's SQLite DB nor a second SDK client. Per-personality paths: two
+// personalities may share one cwd. STATUS: the core producer is not yet shipped;
+// this consumer is unit-tested against the native OpenCode 1.19.3 part schema,
+// not yet proven against a live producer.
+export function opencodeDir(target: PeerRecord): string {
+  return join(iapeerRoot(), 'peers', target.personality, 'opencode')
+}
+function opencodeEventsPath(target: PeerRecord): string | null {
+  const p = join(opencodeDir(target), 'events.jsonl')
+  return existsSync(p) ? p : null
+}
+
+// Pure: busy from a parsed state.json. `starting|busy|approval` keep the turn
+// alive (an approval holds the turn, it has not ended); `idle|stopped|error` end
+// it. A missing/foreign-shaped state is null (caller: idle, like a missing pane-log).
+export function opencodeStateBusy(state: unknown): boolean | null {
+  const st = (state as { status?: unknown } | null)?.status
+  if (typeof st !== 'string') return null
+  return st === 'starting' || st === 'busy' || st === 'approval'
+}
+function opencodeBusy(target: PeerRecord): boolean | null {
+  try {
+    return opencodeStateBusy(JSON.parse(readFileSync(join(opencodeDir(target), 'state.json'), 'utf8')))
+  } catch {
+    return null
+  }
+}
+
+// OpenCode names MCP tools `<sanitized client>_<sanitized tool>` (mcp/catalog.ts
+// toolName), so the iapeer send tool is `<client>_send_to_peer` — normalise it to
+// the canonical gesture name; native tools (bash, read, edit, task, …) pass through.
+export function opencodeToolName(tool: string): string {
+  return tool === 'send_to_peer' || tool.endsWith('_send_to_peer') ? 'send_to_peer' : tool
+}
+
+// A gesture label from a native OpenCode tool input (camelCase filePath, etc.) —
+// same privacy rule as toolLabel: a hint, never file bodies, prompts or args blobs.
+function opencodeToolLabel(tool: string, input: unknown): string | undefined {
+  if (!input || typeof input !== 'object') return undefined
+  const inp = input as Record<string, unknown>
+  const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
+  if (tool === 'send_to_peer') return str(inp.personality)
+  if (tool === 'task') {
+    const sub = str(inp.subagent_type) ?? str(inp.description)
+    return sub ? oneLine(sub) : undefined
+  }
+  if (tool === 'skill') {
+    const n = str(inp.name)
+    return n ? oneLine(n) : undefined
+  }
+  const fp = str(inp.filePath) ?? str(inp.file_path)
+  if (fp) return oneLine(basename(fp))
+  const desc = str(inp.description)
+  if (desc) return oneLine(desc)
+  const cmd = str(inp.command)
+  if (cmd) return oneLine(cmd.trim().split(/\s+/)[0] ?? '')
+  const generic = str(inp.pattern) ?? str(inp.query)
+  return generic ? oneLine(generic) : undefined
+}
+
+// Stateful journal parser (one per reader): dedup by `seq` (the ABI's replay
+// guard), and UPSERT tool parts by part id — native bootstrap snapshots and the
+// pending→running→completed lifecycle repeat the same part, so a gesture is
+// emitted ONCE per part id, at the first non-pending state (pending input is still
+// streaming and has no label yet). Context tokens = the latest assistant
+// message.updated prompt size (input + cache read/write), the same "prompt size
+// now" semantic as the claude/codex paths.
+export function createOpencodeJournalParser(isOperator?: (personality: string) => boolean): {
+  events: (obj: unknown) => ToolEvent[]
+  tokens: (obj: unknown) => number | null
+} {
+  let lastSeq = -Infinity
+  const seen = new Set<string>()
+  let accepted = false
+  return {
+    events(obj: unknown): ToolEvent[] {
+      accepted = false
+      const o = obj as Record<string, any> | null
+      if (!o || o.schema !== 1 || typeof o.seq !== 'number') return []
+      if (o.seq <= lastSeq) return []
+      lastSeq = o.seq
+      accepted = true
+      if (o.type !== 'message.part.updated') return []
+      const part = o.properties?.part
+      if (!part || part.type !== 'tool' || typeof part.tool !== 'string' || typeof part.id !== 'string') return []
+      const status = part.state?.status
+      if (status === 'pending' || typeof status !== 'string') return []
+      if (seen.has(part.id)) return []
+      seen.add(part.id)
+      const tool = opencodeToolName(part.tool)
+      const input = part.state?.input
+      if (tool === 'send_to_peer') {
+        const target = typeof input?.personality === 'string' ? input.personality : undefined
+        if (hideSendGesture(tool, target, isOperator)) return []
+      }
+      const label = opencodeToolLabel(tool, input)
+      return [label ? { tool, label } : { tool }]
+    },
+    // Called right after events() on the same line: only a seq-accepted line counts.
+    tokens(obj: unknown): number | null {
+      if (!accepted) return null
+      const o = obj as Record<string, any> | null
+      if (o?.type !== 'message.updated') return null
+      const info = o.properties?.info
+      if (!info || info.role !== 'assistant') return null
+      const t = info.tokens
+      const n = (v: unknown): number => (typeof v === 'number' && v > 0 ? v : 0)
+      const total = n(t?.input) + n(t?.cache?.read) + n(t?.cache?.write)
+      return total > 0 ? total : null
+    },
+  }
 }
 
 type TranscriptReader = {
@@ -2333,8 +2478,9 @@ function createTranscriptReader(
 ): TranscriptReader | null {
   const path = activeTranscriptPath(target, rt)
   if (!path) return null
-  const parse = rt === 'codex' ? codexLineEvents : claudeLineEvents
-  const tokensOf = rt === 'codex' ? codexContextTokens : claudeContextTokens
+  const oc = rt === 'opencode' ? createOpencodeJournalParser(isOperator) : null
+  const parse = oc ? oc.events : rt === 'codex' ? codexLineEvents : claudeLineEvents
+  const tokensOf = oc ? oc.tokens : rt === 'codex' ? codexContextTokens : claudeContextTokens
   let offset = 0
   let lastTokens: number | null = null
   try {
@@ -2395,11 +2541,45 @@ function createTranscriptReader(
 //     respect Telegram's ~1 edit/sec-per-chat flood limit, and backs off on 429.
 // Fire-and-forget; all activity sends are best-effort and isolated from the
 // send_to_peer outbound queue (a failed/throttled edit never blocks delivery).
+// Pure: the endpoint this turn's typing/activity must follow (docs/20 «Endpoint
+// selection», agreed with iapeer + PM 17.10.2026). The inbound send carries no
+// --runtime, so the core routes it to the profile's default_runtime; control
+// (/stop /new /compact) targets the same default explicitly — one dialogue, one
+// endpoint. Precedence:
+//   1. the profile default CHANGED since turn start → an explicit runtime switch
+//      (/claude /codex, or an alias doing default-runtime → self-fresh) is in
+//      flight: follow the NEW default;
+//   2. else the delivery answer (`delivered_to.runtime`) — authoritative for
+//      the endpoint that actually received this turn;
+//   3. else the default at turn start (where the send was routed).
+// Deliberately NOT the freshest pane-log nor `live-runtime`: with two live
+// runtimes of one personality neither identifies the addressed dialogue.
+export function anchorTurnRuntime(
+  startDefault: string,
+  currentDefault: string | undefined,
+  delivered: string | undefined,
+): string {
+  if (currentDefault && currentDefault !== startDefault) return currentDefault
+  return delivered ?? startDefault
+}
+
+// Current default_runtime from the peer passport, read fresh (cheap JSON read).
+// undefined on any read failure — the caller keeps its anchor.
+function currentDefaultRuntime(target: PeerRecord): string | undefined {
+  if (!target.cwd) return undefined
+  try {
+    return readPeerProfile(target.cwd)?.runtime
+  } catch {
+    return undefined
+  }
+}
+
 async function watchPeerTurn(
   bot: Bot,
   chatId: string,
   target: PeerRecord,
   isOperator?: (personality: string) => boolean,
+  delivery?: Promise<string | undefined>,
 ): Promise<void> {
   const typingOn = process.env.TELEGRAM_TYPING !== '0'
   const activityOn = activityEnabledForPeer(target)
@@ -2407,11 +2587,16 @@ async function watchPeerTurn(
   if (activeWatchers.has(target.personality)) return
   activeWatchers.add(target.personality)
 
-  // Authoritative resolution ONCE at turn start (verb-first, TTL-cached) — closes the
-  // flip-race the mtime-only liveRuntime() heuristic cannot (see resolveLiveRuntime).
-  // Threaded explicitly through the reader + busy-gate below so both key off the SAME
-  // runtime; re-checked mid-turn further down (a flip mid-turn re-resolves `rt`).
-  let rt = await resolveLiveRuntime(target)
+  // Anchor on the ADDRESSED endpoint (see anchorTurnRuntime): the default the send
+  // was routed to, corrected by the delivery answer once it arrives, and by an
+  // explicit default switch mid-turn. Threaded through the reader + busy-gate so
+  // both key off the SAME runtime.
+  const startDefault = target.runtime
+  let deliveredRt: string | undefined
+  void delivery?.then(r => {
+    deliveredRt = r
+  })
+  let rt = anchorTurnRuntime(startDefault, undefined, undefined)
   let reader = activityOn ? createTranscriptReader(target, isOperator, rt) : null
   if (activityOn && !reader) {
     logActivity('reader.none', { peer: target.personality, runtime: rt, cwd: target.cwd })
@@ -2555,16 +2740,21 @@ async function watchPeerTurn(
       // the whole turn is what re-enables BOTH channels. The TYPING_MIN_MS grace
       // covers the startup window before the peer's first byte; a missing log
       // (age null) reads as idle, exactly as the old null pane did.
-      const age = paneLogAgeMs(target, rt)
-      const busy = age !== null && age < PANELOG_BUSY_MS
-      // Cheap sync suspicion that `rt` has gone stale (a runtime flip happened
-      // mid-turn): the mtime heuristic now disagrees with the runtime we resolved
-      // at turn start. Reverify with the authoritative verb before acting on it —
-      // resolveLiveRuntime's own TTL cache bounds how often that subprocess runs.
-      if (liveRuntime(target) !== rt) {
-        const verified = await resolveLiveRuntime(target)
+      // OpenCode: busy/idle is the core's state.json status, NOT the pane-log mtime
+      // (docs/20 «Observability ABI»); claude/codex keep the pane-log contract.
+      const age = rt === 'opencode' ? null : paneLogAgeMs(target, rt)
+      const busy = rt === 'opencode' ? opencodeBusy(target) === true : age !== null && age < PANELOG_BUSY_MS
+      // Re-anchor: the delivery answer arrived, or an explicit default switch
+      // happened mid-turn (see anchorTurnRuntime).
+      {
+        const verified = anchorTurnRuntime(startDefault, currentDefaultRuntime(target), deliveredRt)
         if (verified !== rt) {
-          logActivity('runtime-flip', { peer: target.personality, from: rt, to: verified })
+          logActivity('runtime-flip', {
+            peer: target.personality,
+            from: rt,
+            to: verified,
+            via: verified === deliveredRt ? 'delivered_to' : 'default-switch',
+          })
           rt = verified
           if (reader) {
             // Re-tail the NEW runtime's transcript from its current EOF. Any
@@ -3217,10 +3407,15 @@ async function handleInboundMessage(args: {
     len: inboundLen,
     att: inboundAtt,
   })
+  // The endpoint the core actually delivered this turn to (delivered_to.runtime),
+  // handed to the activity watcher as its authoritative anchor.
+  let resolveDelivered: (rt: string | undefined) => void = () => {}
+  const delivered = new Promise<string | undefined>(r => (resolveDelivered = r))
   enqueueIapSend(async () => {
     const startedAt = Date.now()
     const result = await runIapSend(args.ctx, target.personality, deliveredText, attachments)
     const ms = Date.now() - startedAt
+    resolveDelivered(result.ok ? parseIapSendDeliveredRuntime(result.stdout) : undefined)
     if (!result.ok) {
       logInbound('inbound.fail', {
         peer: target.personality,
@@ -3246,6 +3441,7 @@ async function handleInboundMessage(args: {
     logInbound('inbound.ok', {
       peer: target.personality,
       woke: parseIapSendWoke(result.stdout),
+      runtime: parseIapSendDeliveredRuntime(result.stdout),
       ms,
       len: inboundLen,
       att: inboundAtt,
@@ -3268,7 +3464,7 @@ async function handleInboundMessage(args: {
       .map(p => p.personality),
   )
   const isOperator = (personality: string): boolean => operatorTargets.has(personality)
-  void watchPeerTurn(args.bot, args.ctx.ownerUserId, target, isOperator)
+  void watchPeerTurn(args.bot, args.ctx.ownerUserId, target, isOperator, delivered)
 }
 
 // ─── Slash-menu auto-registration (setMyCommands) ────────────────────────────
