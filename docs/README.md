@@ -5,7 +5,7 @@
 telegram-runtime is a bridge between Telegram and a team of [iapeer](https://github.com/agfpd/iapeer) agents. It gives a person presence in the system through Telegram: the owner messages an agent from the messenger and gets replies in the same chat. To the agent, the person is an ordinary peer it messages with `send_to_peer`; the bridge turns that into a message in the right Telegram chat and back.
 
 ```text
-   person in Telegram                          agent (Claude/Codex)
+   person in Telegram                          agent (Claude/Codex/OpenCode)
         │  messages the bot                         │  send_to_peer(arthur, "…")
         ▼                                            ▼
    ┌──────────────────────────────────────────────────────────┐
@@ -16,7 +16,7 @@ telegram-runtime is a bridge between Telegram and a team of [iapeer](https://git
    └──────────────────────────────────────────────────────────┘
 ```
 
-It's an iapeer runtime: the human counterpart to the Claude and Codex agent runtimes. Agents get no Telegram tools — the channel is transparent to them, they just message a peer by name.
+It's an iapeer runtime: the human counterpart to the Claude, Codex and OpenCode agent runtimes. Agents get no Telegram tools — the channel is transparent to them, they just message a peer by name.
 
 ## What it does
 

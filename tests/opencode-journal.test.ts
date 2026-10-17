@@ -160,3 +160,18 @@ describe('replay of the real core-produced journal with tool calls (iapeer 30e6b
     expect(run()).toEqual([{ tool: 'bash', label: 'write marker' }])
   })
 })
+
+describe('opencodeToolName — MCP prefix parity with the claude path', () => {
+  test('known client prefix is stripped to the bare tool name', () => {
+    expect(opencodeToolName('impact-volvo_semantic_find_part', ['impact-volvo'])).toBe('semantic_find_part')
+    expect(opencodeToolName('iapeer_send_to_peer', [])).toBe('send_to_peer')
+    expect(opencodeToolName('iapeer_list_peers', [])).toBe('list_peers')
+    // a client whose name sanitizes (dot → underscore), longest prefix wins
+    expect(opencodeToolName('my_srv_v2_do_it', ['my.srv', 'my.srv_v2'])).toBe('do_it')
+  })
+  test('unknown prefix and native tools pass through', () => {
+    expect(opencodeToolName('impact-volvo_semantic_find_part', [])).toBe('impact-volvo_semantic_find_part')
+    expect(opencodeToolName('bash', ['impact-volvo'])).toBe('bash')
+    expect(opencodeToolName('impact-volvo_', ['impact-volvo'])).toBe('impact-volvo_')
+  })
+})

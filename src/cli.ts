@@ -2339,10 +2339,31 @@ function opencodeBusy(target: PeerRecord): boolean | null {
 }
 
 // OpenCode names MCP tools `<sanitized client>_<sanitized tool>` (mcp/catalog.ts
-// toolName), so the iapeer send tool is `<client>_send_to_peer` — normalise it to
-// the canonical gesture name; native tools (bash, read, edit, task, …) pass through.
-export function opencodeToolName(tool: string): string {
-  return tool === 'send_to_peer' || tool.endsWith('_send_to_peer') ? 'send_to_peer' : tool
+// toolName). Parity with the claude path (shortToolName strips mcp__<server>__): the
+// gesture shows the BARE tool name. The split is ambiguous on `_` alone (both halves
+// may contain it), so the prefix is stripped only for a KNOWN client — the peer's
+// configured MCP servers (`mcp` keys of its opencode.json) plus the core's `iapeer`.
+// The iapeer send tool normalises to `send_to_peer` regardless; native tools (bash,
+// read, edit, task, …) and unknown prefixes pass through unchanged.
+const sanitizeMcpName = (n: string): string => n.replace(/[^a-zA-Z0-9_-]/g, '_')
+export function opencodeToolName(tool: string, mcpClients: readonly string[] = []): string {
+  if (tool === 'send_to_peer' || tool.endsWith('_send_to_peer')) return 'send_to_peer'
+  const prefixes = [...mcpClients, 'iapeer'].map(c => sanitizeMcpName(c) + '_').sort((a, b) => b.length - a.length)
+  for (const pre of prefixes) {
+    if (tool.startsWith(pre) && tool.length > pre.length) return tool.slice(pre.length)
+  }
+  return tool
+}
+
+// The peer's configured MCP client names from the core-composed opencode.json in its
+// private dir. Best-effort: unreadable/absent → [] (gestures keep the prefixed name).
+export function opencodeMcpClients(target: PeerRecord): string[] {
+  try {
+    const cfg = JSON.parse(readFileSync(join(opencodeDir(target), 'opencode.json'), 'utf8')) as { mcp?: unknown }
+    return cfg.mcp && typeof cfg.mcp === 'object' ? Object.keys(cfg.mcp) : []
+  } catch {
+    return []
+  }
 }
 
 // A gesture label from a native OpenCode tool input (camelCase filePath, etc.) —
@@ -2377,7 +2398,10 @@ function opencodeToolLabel(tool: string, input: unknown): string | undefined {
 // streaming and has no label yet). Context tokens = the latest assistant
 // message.updated prompt size (input + cache read/write), the same "prompt size
 // now" semantic as the claude/codex paths.
-export function createOpencodeJournalParser(isOperator?: (personality: string) => boolean): {
+export function createOpencodeJournalParser(
+  isOperator?: (personality: string) => boolean,
+  mcpClients: readonly string[] = [],
+): {
   events: (obj: unknown) => ToolEvent[]
   tokens: (obj: unknown) => number | null
 } {
@@ -2399,7 +2423,7 @@ export function createOpencodeJournalParser(isOperator?: (personality: string) =
       if (status === 'pending' || typeof status !== 'string') return []
       if (seen.has(part.id)) return []
       seen.add(part.id)
-      const tool = opencodeToolName(part.tool)
+      const tool = opencodeToolName(part.tool, mcpClients)
       const input = part.state?.input
       if (tool === 'send_to_peer') {
         const target = typeof input?.personality === 'string' ? input.personality : undefined
@@ -2483,7 +2507,7 @@ function createTranscriptReader(
 ): TranscriptReader | null {
   const path = activeTranscriptPath(target, rt)
   if (!path) return null
-  const oc = rt === 'opencode' ? createOpencodeJournalParser(isOperator) : null
+  const oc = rt === 'opencode' ? createOpencodeJournalParser(isOperator, opencodeMcpClients(target)) : null
   const parse = oc ? oc.events : rt === 'codex' ? codexLineEvents : claudeLineEvents
   const tokensOf = oc ? oc.tokens : rt === 'codex' ? codexContextTokens : claudeContextTokens
   let offset = 0
@@ -3587,6 +3611,7 @@ export function buildBotCommands(
     for (const rt of switchable) {
       cmds.push({ command: rt, description: `switch this peer to ${rt} (restart)` })
     }
+    cmds.push({ command: 'runtime', description: 'show the default runtime and the switch targets' })
   } else if (discovery.state === 'absent' && declaredCount >= 2) {
     // Pre-discovery core: no switch can be offered (docs/15), but a multi-runtime peer
     // gets ONE explanatory entry instead of a silently shrunken menu.

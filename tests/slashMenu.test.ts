@@ -48,7 +48,7 @@ describe('buildBotCommands', () => {
   test('runtime-switch commands come from discovered agent endpoints only, when ≥2', () => {
     const ok = (runtimes: string[]) => ({ state: 'ok' as const, runtimes })
     const cmds = buildBotCommands(peer({ runtimes: ['claude', 'codex', 'opencode'] }), null, ok(['claude', 'codex', 'opencode']))
-    expect(names(cmds)).toEqual(['new', 'compact', 'stop', 'activity', 'claude', 'codex', 'opencode'])
+    expect(names(cmds)).toEqual(['new', 'compact', 'stop', 'activity', 'claude', 'codex', 'opencode', 'runtime'])
     // declared but not hostable on this core → not offered
     expect(names(buildBotCommands(peer({ runtimes: ['claude', 'codex'] }), null, ok(['claude'])))).toEqual(['new', 'compact', 'stop', 'activity'])
   })
