@@ -10,6 +10,37 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.28.5] - 2026-10-17
+
+### Changed
+
+- The runtime-switch menu and the bare `/<runtime>` control are driven by the
+  core's agent-endpoint discovery (`/fleet/v1/snapshot` `runtimes[].agent`,
+  iapeer ≥ 0.4.115) instead of a local `claude`/`codex` list, so new agent
+  runtimes (OpenCode) appear without a code change. A core without discovery
+  (older, or rolled back) is said, not hidden: the menu shows one `/runtime`
+  entry and `/runtime`/`/claude`/`/codex` answer that switching requires
+  iapeer ≥ 0.4.115 (logged as `runtime-switch-unavailable`). An unreachable
+  core keeps the last registered menu.
+- Activity and typing follow the addressed endpoint: `default_runtime` at turn
+  start, corrected by `delivered_to.runtime` from `iapeer send` and by an
+  explicit default switch mid-turn — not the freshest pane-log, which is
+  ambiguous when one personality has two live runtimes. An unknown runtime
+  never borrows Claude's transcript from a shared cwd.
+
+### Added
+
+- OpenCode activity consumer of the core-produced journal
+  `<IAPEER_ROOT>/state/opencode/<p>/{events.jsonl,state.json}` (iapeer docs/20):
+  seq dedup, tool-part upsert by id, MCP `<client>_send_to_peer` normalisation,
+  context tokens, busy from `state.json`. Replayed against the real core
+  producer's output; dormant until an OpenCode peer exists.
+
+### Packaging
+
+- `repository.url` in `package.json` (npm provenance); publication through the
+  trusted-publishing workflow `publish.yml` with the exact accepted archive.
+
 ## [0.28.4] - 2026-10-16
 
 ### Fixed
