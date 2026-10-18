@@ -10,6 +10,17 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.28.7] - 2026-10-18
+
+### Changed
+
+- `/stop` interrupts the peer in ALL its live runtimes at once: it now runs
+  `iapeer interrupt <peer>` without a runtime, which since iapeer 0.4.130 fans
+  out to every live endpoint in parallel (a peer busy in claude and opencode is
+  halted in both by one `/stop`). `/new` and `/compact` still address one
+  runtime. Requires iapeer >= 0.4.130; an older core rejects the runtime-less
+  form when 2+ runtimes are live.
+
 ## [0.28.6] - 2026-10-18
 
 ### Fixed

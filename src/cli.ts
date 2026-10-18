@@ -2995,18 +2995,22 @@ function resolveIapeerBin(): string {
   return 'iapeer'
 }
 
-// Spawn `iapeer interrupt <personality> <runtime>` for the peer bound to this
-// bot and feed the result back to the operator. The contract (fixed by iapeer):
-//   exit 0 → interrupted (stdout «interrupt → <p> (<rt>)»); context intact.
-//   exit 1 → peer not in a live session (stderr «… peer offline: <p> (<rt>)»).
-// Runtime is passed EXPLICITLY (we know the chat→peer→runtime binding via the
-// peer record), avoiding the CLI's "specify runtime" error when 2+ runtimes are
-// live. Idempotent and safe to repeat. Any spawn/parse failure is surfaced to
+// Spawn `iapeer interrupt <personality>` for the peer bound to this bot and
+// feed the result back to the operator. /stop deliberately passes NO runtime:
+// since iapeer 0.4.130 the runtime-less form interrupts EVERY live endpoint of
+// the peer in parallel (a peer busy in claude AND opencode → one /stop halts
+// both). Contract (fixed by iapeer, topic stop-all-runtimes):
+//   exit 0 → at least one endpoint interrupted (stdout «interrupt → <p> (claude,
+//            opencode)»); a partial failure still exits 0 with
+//            «interrupt: <p> (<rt>) failed: …» on stderr; context intact.
+//   exit 1 → none interrupted; no live endpoint → stderr «peer offline: <p>».
+// /new and /compact still address ONE runtime (target.runtime) — only /stop
+// fans out. Idempotent and safe to repeat. Any spawn/parse failure is surfaced to
 // the operator and swallowed — a control command must never throw into the
 // delivery path.
 export async function handleStopCommand(bot: Bot, chatId: string, target: PeerRecord): Promise<void> {
   const bin = resolveIapeerBin()
-  const result = spawnSync(bin, ['interrupt', target.personality, target.runtime], {
+  const result = spawnSync(bin, ['interrupt', target.personality], {
     encoding: 'utf8',
   })
   const stdout = (result.stdout ?? '').trim()

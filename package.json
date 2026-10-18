@@ -1,6 +1,6 @@
 {
   "name": "@agfpd/telegram-runtime",
-  "version": "0.28.6",
+  "version": "0.28.7",
   "description": "Telegram runtime-router for IAP peers.",
   "repository": {
     "type": "git",

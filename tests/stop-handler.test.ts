@@ -7,7 +7,8 @@ import { handleStopCommand } from '../src/cli.ts'
 // Hermetic, non-destructive integration proof for the stop→interrupt path.
 // We point TELEGRAM_RUNTIME_IAPEER_BIN at a stub that records its argv and exits
 // with a scripted code, so the test asserts (a) the exact spawn contract
-// (`interrupt <personality> <runtime>`, runtime passed explicitly) and (b) the
+// (`interrupt <personality>`, NO runtime — iapeer ≥0.4.130 fans out to all live
+// runtimes) and (b) the
 // exit-code→operator-feedback mapping — without touching any real peer session.
 
 const tmp = mkdtempSync(join(tmpdir(), 'stop-handler-'))
@@ -41,12 +42,20 @@ function fakeBot(sent: string[]): any {
 const target: any = { personality: 'darwin', runtime: 'claude', cwd: '/tmp/x' }
 
 describe('handleStopCommand — spawn contract + feedback mapping', () => {
-  test('exit 0 → spawns `interrupt <personality> <runtime>` and confirms', async () => {
+  test('exit 0 → spawns runtime-less `interrupt <personality>` and confirms', async () => {
     writeFileSync(argvFile, '')
-    installStub(0, 'interrupt → darwin (claude)\n', '')
+    installStub(0, 'interrupt → darwin (claude, opencode)\n', '')
     const sent: string[] = []
     await handleStopCommand(fakeBot(sent), '123', target)
-    expect(readFileSync(argvFile, 'utf8').trim()).toBe('interrupt darwin claude')
+    expect(readFileSync(argvFile, 'utf8').trim()).toBe('interrupt darwin')
+    expect(sent).toEqual(['interrupted'])
+  })
+
+  test('partial failure (exit 0 + stderr failed) → still confirms interrupted', async () => {
+    writeFileSync(argvFile, '')
+    installStub(0, 'interrupt → darwin (claude)\n', 'interrupt: darwin (opencode) failed: timeout\n')
+    const sent: string[] = []
+    await handleStopCommand(fakeBot(sent), '1', target)
     expect(sent).toEqual(['interrupted'])
   })
 
