@@ -10,6 +10,20 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.28.6] - 2026-10-18
+
+### Fixed
+
+- OpenCode gestures show the bare MCP tool name (`semantic_find_part`), as the
+  claude path does, instead of OpenCode's `<client>_<tool>` form. The prefix is
+  stripped only for a known client: the peer's configured MCP servers
+  (`opencode.json`) and the core's `iapeer`.
+
+### Changed
+
+- `/runtime` is in the slash menu whenever a runtime switch is offered, not only
+  on a core without discovery.
+
 ## [0.28.5] - 2026-10-17
 
 ### Changed
