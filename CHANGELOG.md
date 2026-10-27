@@ -10,6 +10,23 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.28.8] - 2026-10-27
+
+### Fixed
+
+- Poller replacements no longer disappear into grammY's pre-poll bootstrap
+  retry loop during an outage. `getMe`/`deleteWebhook` have bounded end-to-end
+  attempts, with visible supervisor-owned retries (1–15 s). grammY 1.44.0's
+  internal millisecond/second mismatch could previously delay recovery for hours.
+- An independent startup watchdog and fatal unfenced-generation boundary prevent
+  silently abandoned or overlapping pollers; unexpected clean exits are retried.
+  Bootstrap failures, startup timeouts and fatal fences have structured events.
+- Unsuccessful/invalid `getUpdates` responses no longer emit a healthy heartbeat;
+  they emit rate-limited `poll.error` events instead.
+- Added a credential-free live HTTP outage/recovery probe, including the original
+  failure and its real 100-second bootstrap retry delay, plus regression coverage
+  for both bootstrap calls, network/API/body stalls and fail-outward behavior.
+
 ## [0.28.7] - 2026-10-18
 
 ### Changed

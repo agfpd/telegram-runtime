@@ -75,6 +75,7 @@ You rarely need these — the defaults are tuned. They're listed so the behavior
 | `TELEGRAM_POLL_TIMEOUT_SECONDS` | 30 | Telegram server wait for each `getUpdates` long poll |
 | `TELEGRAM_POLL_STALL_MS` | 45000 | hard end-to-end deadline after which a stuck poller generation is replaced; defaults to at least the server wait plus 15 s |
 | `TELEGRAM_POLL_STOP_STALL_MS` | 10000 | deadline for grammY's final offset-confirm request while replacing a poller |
+| `TELEGRAM_POLL_BOOTSTRAP_MS` | 30000 | end-to-end deadline per `getMe`/`deleteWebhook`; independent startup watchdog adds 5 s, then requires a stopped generation within `TELEGRAM_POLL_STOP_STALL_MS` + 5 s or exits nonzero |
 | `TELEGRAM_POLL_HEARTBEAT_MS` | 300000 | interval for aggregated per-bot polling-health events |
 | `TELEGRAM_POLL_LOG` | on | structured polling events on stderr; `0` disables them |
 | `TELEGRAM_NEW_TIMEOUT_MS` | 300000 | timeout for the `/new` command (5 min) |

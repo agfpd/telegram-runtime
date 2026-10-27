@@ -58,6 +58,7 @@ import { writeJsonAtomic } from './fsAtomic.ts'
 import { acquireProcessLock, type ReleaseLock } from './botLock.ts'
 import {
   createGuardedPollingFetch,
+  guardPollingBootstrap,
   supervisePolling,
   type FetchLike,
   type PollingGeneration,
@@ -86,6 +87,7 @@ const POLL_TIMEOUT_SECONDS = Number(process.env.TELEGRAM_POLL_TIMEOUT_SECONDS ??
 const POLL_STALL_MS =
   Number(process.env.TELEGRAM_POLL_STALL_MS ?? '') || Math.max(45_000, (POLL_TIMEOUT_SECONDS + 15) * 1000)
 const POLL_STOP_STALL_MS = Number(process.env.TELEGRAM_POLL_STOP_STALL_MS ?? '') || 10_000
+const POLL_BOOTSTRAP_MS = Number(process.env.TELEGRAM_POLL_BOOTSTRAP_MS ?? '') || 30_000
 const POLL_HEARTBEAT_MS = Number(process.env.TELEGRAM_POLL_HEARTBEAT_MS ?? '') || 300_000
 // Rich messages (Bot API 10.1, released 2026-06-11): an outbound peer envelope
 // is sent as ONE rich message — `InputRichMessage.markdown` carries the agent's
@@ -4074,6 +4076,7 @@ function makePollingGeneration(
     heartbeatMs: POLL_HEARTBEAT_MS,
   })
   const bot = new Bot(credential.token, { client: { fetch: guarded.fetch as typeof fetch } })
+  guardPollingBootstrap(bot, { botKey, generation, timeoutMs: POLL_BOOTSTRAP_MS, log: logPolling })
   installBotHandlers(ctx, botKey, bot, credential)
   return { bot, stalled: guarded.stalled }
 }
@@ -4102,6 +4105,7 @@ async function startPolling(
     // Bot.stop's final offset-confirm request has its own guarded 10 s
     // deadline. This outer wait is only a last-resort generation fence.
     stopWaitMs: POLL_STOP_STALL_MS + 5000,
+    startupWaitMs: POLL_BOOTSTRAP_MS + 5000,
   })
 }
 

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { Bot } from 'grammy'
 import {
   createGuardedPollingFetch,
+  guardPollingBootstrap,
   supervisePolling,
   type FetchLike,
   type PollingGeneration,
@@ -13,6 +14,106 @@ function telegramResponse(result: unknown): Response {
 }
 
 describe('per-bot polling liveness', () => {
+  for (const method of ['getMe', 'deleteWebhook'] as const) {
+    for (const failure of ['network', 'api-503', 'body-hang'] as const) {
+      test(`bootstrap ${method}: ${failure} escapes grammY hidden retries and recovers`, async () => {
+        const events: Array<{ event: string; fields: Record<string, unknown> }> = []
+        const controller = new AbortController()
+        const delivered: string[] = []
+        const calls: number[] = []
+        const makeGeneration = (generation: number): PollingGeneration<Bot> => {
+          const guarded = createGuardedPollingFetch({
+            botKey: 'bootstrap_bot', generation, stallMs: 100, stopStallMs: 20, heartbeatMs: 1000,
+            log: (event, fields = {}) => events.push({ event, fields }),
+            fetch: async (input, init) => {
+              const apiMethod = String(input).split('/').pop()
+              if (apiMethod === method && generation === 1) {
+                calls.push(generation)
+                if (failure === 'network') throw new Error('network /botSECRET/getMe failed')
+                if (failure === 'api-503') return Response.json({ ok: false, error_code: 503, description: 'offline' })
+                return new Response(new ReadableStream({ start() {} })) // headers received, body stuck
+              }
+              if (apiMethod === 'getMe') return telegramResponse({ id: 1, is_bot: true, first_name: 'Probe', username: 'bootstrap_bot' })
+              if (apiMethod === 'deleteWebhook') return telegramResponse(true)
+              const payload = JSON.parse(init!.body as string)
+              if (payload.limit === 1) return telegramResponse([])
+              return telegramResponse([{ update_id: 1, message: {
+                message_id: 1, date: 1, chat: { id: 1, type: 'private' }, text: 'recovered',
+              } }])
+            },
+          })
+          const bot = new Bot('1:probe', { client: { fetch: guarded.fetch as typeof fetch } })
+          guardPollingBootstrap(bot, { botKey: 'bootstrap_bot', generation, timeoutMs: 15,
+            log: (event, fields = {}) => events.push({ event, fields }) })
+          bot.on('message:text', ctx => { delivered.push(ctx.message.text); controller.abort() })
+          return { bot, stalled: guarded.stalled }
+        }
+        await supervisePolling({
+          botKey: 'bootstrap_bot', pollTimeoutSeconds: 30, makeGeneration,
+          publish: () => {}, onStart: () => {}, signal: controller.signal,
+          log: (event, fields = {}) => events.push({ event, fields }),
+          retryDelayMs: () => 0, stopWaitMs: 50, startupWaitMs: 100,
+        })
+        expect(calls).toEqual([1]) // NO hidden second attempt or 100 s sleep
+        expect(delivered).toEqual(['recovered'])
+        expect(events.some(e => e.event === 'poll.failed')).toBe(true)
+        expect(events.find(e => e.event === 'poll.bootstrap.error')?.fields).toMatchObject({
+          method, generation: 1, timedOut: failure === 'body-hang',
+        })
+        expect(JSON.stringify(events)).not.toContain('SECRET')
+      })
+    }
+  }
+
+  test('unexpected clean polling exit is visible and retried, not silently retired', async () => {
+    const controller = new AbortController()
+    const published: number[] = []
+    const events: string[] = []
+    await supervisePolling({
+      botKey: 'clean_stop_bot', pollTimeoutSeconds: 30,
+      makeGeneration: generation => ({
+        bot: {
+          async start() { if (generation === 2) controller.abort() },
+          async stop() {},
+        }, stalled: new Promise(() => {}),
+      }),
+      publish: (_bot, generation) => { published.push(generation) }, onStart: () => {},
+      log: event => { events.push(event) }, signal: controller.signal, retryDelayMs: () => 0,
+    })
+    expect(published).toEqual([1, 2])
+    expect(events).toContain('poll.failed')
+  })
+
+  test('bootstrap that cannot be fenced fails outward rather than creating zombie generations', async () => {
+    const events: string[] = []
+    let generations = 0
+    await expect(supervisePolling({
+      botKey: 'unfenceable_bot', pollTimeoutSeconds: 30,
+      makeGeneration: () => {
+        generations++
+        return { bot: { start: () => new Promise<void>(() => {}), async stop() {} }, stalled: new Promise(() => {}) }
+      },
+      publish: () => {}, onStart: () => {}, log: event => { events.push(event) },
+      startupWaitMs: 10, stopWaitMs: 10,
+    })).rejects.toThrow('could not be fenced')
+    expect(generations).toBe(1)
+    expect(events).toContain('poll.start.timeout')
+    expect(events).toContain('poll.fatal')
+    expect(events).not.toContain('poll.restart')
+  })
+
+  test('bootstrap guard does not change getUpdates/outbound API errors', async () => {
+    const bot = new Bot('1:probe', { client: { fetch: (async () => {
+      return Response.json({ ok: false, error_code: 429, description: 'retry later', parameters: { retry_after: 3 } })
+    }) as unknown as typeof fetch } })
+    guardPollingBootstrap(bot, { botKey: 'probe_bot', generation: 1, timeoutMs: 10, log: () => {} })
+    for (const call of [() => bot.api.getUpdates(), () => bot.api.sendMessage(1, 'probe')]) {
+      try { await call(); throw new Error('expected API failure') } catch (error) {
+        expect(error).toHaveProperty('error_code', 429)
+      }
+    }
+  })
+
   test('healthy empty long polls emit an aggregated heartbeat distinct from updates', async () => {
     const events: Array<{ event: string; fields: Record<string, unknown> }> = []
     const results: unknown[][] = [[], [], [{ update_id: 7 }, { update_id: 8 }]]
@@ -52,6 +153,17 @@ describe('per-bot polling liveness', () => {
       emptyCycles: 1,
       updates: 2,
     })
+  })
+
+  test('API failures are visible but never count as healthy polling heartbeats', async () => {
+    const events: Array<{ event: string; fields: Record<string, unknown> }> = []
+    const guarded = createGuardedPollingFetch({
+      botKey: 'error_bot', generation: 1, stallMs: 100, stopStallMs: 10, heartbeatMs: 1000,
+      fetch: async () => Response.json({ ok: false, error_code: 503, description: 'offline' }),
+      log: (event, fields = {}) => events.push({ event, fields }),
+    })
+    await guarded.fetch('https://api.telegram.org/botTOKEN/getUpdates')
+    expect(events.map(e => e.event)).toEqual(['poll.error'])
   })
 
   test('a cancellation-ignoring stuck getUpdates trips the deadline while outbound stays usable', async () => {

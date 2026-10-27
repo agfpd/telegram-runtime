@@ -1,3 +1,5 @@
+import type { Bot } from 'grammy'
+
 export type PollingLog = (event: string, fields?: Record<string, unknown>) => void
 
 export type PollingStall = {
@@ -116,6 +118,23 @@ export function createGuardedPollingFetch(options: PollingFetchOptions): Guarded
   let maxCycleMs = 0
   let lastErrorLogAt = 0
 
+  const reportError = (error: unknown, requestSeq: number, startedAt: number): void => {
+    errors++
+    const at = now()
+    // A disconnected host can fail every three seconds via grammY's retry
+    // loop. Emit immediately, then at most once a minute per generation.
+    if (lastErrorLogAt === 0 || at - lastErrorLogAt >= 60_000) {
+      options.log('poll.error', {
+        botKey: options.botKey,
+        generation: options.generation,
+        seq: requestSeq,
+        ageMs: Math.max(0, at - startedAt),
+        detail: safeErrorDetail(error),
+      })
+      lastErrorLogAt = at
+    }
+  }
+
   const emitHeartbeat = (cycleMs: number): void => {
     const at = now()
     cycles++
@@ -214,28 +233,18 @@ export function createGuardedPollingFetch(options: PollingFetchOptions): Guarded
       const cycleMs = Math.max(0, now() - startedAt)
       if (phase === 'long-poll') {
         const count = telegramUpdateCount(bytes)
-        if (count === 0) emptyCycles++
-        else if (count !== null) updates += count
-        emitHeartbeat(cycleMs)
+        if (count === null) {
+          reportError(new Error('getUpdates returned an unsuccessful or invalid Bot API response'), requestSeq, startedAt)
+        } else {
+          if (count === 0) emptyCycles++
+          else updates += count
+          emitHeartbeat(cycleMs)
+        }
       }
       return bufferedResponse(response, bytes)
     } catch (error) {
       if (phase === 'long-poll' && !(error instanceof PollingDeadlineError) && !parentSignal?.aborted) {
-        errors++
-        const at = now()
-        // A disconnected host can make every bot fail every three seconds via
-        // grammY's retry loop. Emit immediately, then at most once a minute per
-        // bot generation; the counter rides the next heartbeat.
-        if (lastErrorLogAt === 0 || at - lastErrorLogAt >= 60_000) {
-          options.log('poll.error', {
-            botKey: options.botKey,
-            generation: options.generation,
-            seq: requestSeq,
-            ageMs: Math.max(0, at - startedAt),
-            detail: safeErrorDetail(error),
-          })
-          lastErrorLogAt = at
-        }
+        reportError(error, requestSeq, startedAt)
       }
       throw error
     } finally {
@@ -257,6 +266,61 @@ export type PollingGeneration<TBot> = {
   stalled: Promise<PollingStall>
 }
 
+/**
+ * Bot.start() retries getMe/deleteWebhook internally, BEFORE onStart or the
+ * first getUpdates. In grammY 1.44.0 its ms backoff is passed to sleep(seconds),
+ * so a disconnected bootstrap can go silent for hours. Own that retry at the
+ * supervisor layer instead. This must wrap the API transformer (not fetch):
+ * grammY converts fetch errors back into retryable HttpError instances.
+ */
+export function guardPollingBootstrap(
+  bot: Pick<Bot, 'api'>,
+  options: { botKey: string; generation: number; timeoutMs: number; log: PollingLog },
+): void {
+  bot.api.config.use(async (prev, method, payload, signal) => {
+    if (method !== 'getMe' && method !== 'deleteWebhook') return prev(method, payload, signal)
+    const startedAt = Date.now()
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    if (signal?.aborted) abort()
+    else signal?.addEventListener('abort', abort, { once: true })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let timedOut = false
+    try {
+      const result = await Promise.race([
+        Promise.resolve().then(() => prev(method, payload, controller.signal)),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true
+            reject(new Error(`bootstrap exceeded ${options.timeoutMs} ms`))
+            controller.abort()
+          }, options.timeoutMs)
+        }),
+      ])
+      // prev returns the raw Bot API response. callApi would otherwise turn
+      // a 5xx/429 response into GrammyError OUTSIDE this transformer.
+      if (!result.ok) throw new Error(`Bot API ${result.error_code}: ${result.description}`)
+      return result
+    } catch (error) {
+      const detail = safeErrorDetail(error)
+      options.log('poll.bootstrap.error', {
+        botKey: options.botKey,
+        generation: options.generation,
+        method,
+        ageMs: Date.now() - startedAt,
+        timedOut,
+        detail,
+      })
+      // Deliberately NOT HttpError/GrammyError: bypass withRetries. A failed
+      // generation is retried by supervisePolling with bounded, visible delay.
+      throw new Error(`Telegram bootstrap ${method} failed: ${detail}`)
+    } finally {
+      if (timer) clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+    }
+  })
+}
+
 export type PollingSupervisorOptions<TBot extends PollingBot<TInfo>, TInfo> = {
   botKey: string
   pollTimeoutSeconds: number
@@ -268,6 +332,7 @@ export type PollingSupervisorOptions<TBot extends PollingBot<TInfo>, TInfo> = {
   signal?: AbortSignal
   retryDelayMs?: (attempt: number) => number
   stopWaitMs?: number
+  startupWaitMs?: number
   sleep?: (ms: number) => Promise<void>
 }
 
@@ -276,96 +341,130 @@ type SupervisorOutcome =
   | { kind: 'failed'; error: unknown }
   | { kind: 'stalled'; stall: PollingStall }
   | { kind: 'aborted' }
+  | { kind: 'startup-timeout' }
 
-function abortOutcome(signal?: AbortSignal): Promise<SupervisorOutcome> {
-  if (!signal) return new Promise(() => {})
-  if (signal.aborted) return Promise.resolve({ kind: 'aborted' })
-  return new Promise(resolve => {
-    signal.addEventListener('abort', () => resolve({ kind: 'aborted' }), { once: true })
-  })
-}
-
-/** Restarts one bot generation after the guarded getUpdates deadline fires. */
+/** Supervises bootstrap AND polling; an unfenceable generation is process-fatal. */
 export async function supervisePolling<TBot extends PollingBot<TInfo>, TInfo>(
   options: PollingSupervisorOptions<TBot, TInfo>,
 ): Promise<void> {
   const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
   const retryDelayMs = options.retryDelayMs ?? (attempt => Math.min(1000 * attempt, 15_000))
   const stopWaitMs = options.stopWaitMs ?? 15_000
+  const startupWaitMs = options.startupWaitMs ?? 35_000
   let generation = 0
   let attempt = 0
   let initial = options.initial
 
-  while (!options.signal?.aborted) {
-    generation++
-    const current = initial ?? options.makeGeneration(generation)
-    initial = undefined
-    options.publish(current.bot, generation)
-    let started = false
-    const run = current.bot
-      .start({
-        timeout: options.pollTimeoutSeconds,
-        onStart: async info => {
-          started = true
-          attempt = 0
-          options.log('poll.start', { botKey: options.botKey, generation })
-          await options.onStart(info, generation)
-        },
+  let onAbort!: () => void
+  const aborted = new Promise<SupervisorOutcome>(resolve => {
+    onAbort = () => resolve({ kind: 'aborted' })
+    if (options.signal?.aborted) onAbort()
+    else options.signal?.addEventListener('abort', onAbort, { once: true })
+  })
+  try {
+    while (!options.signal?.aborted) {
+      const currentGeneration = ++generation
+      const current = initial ?? options.makeGeneration(generation)
+      initial = undefined
+      options.publish(current.bot, generation)
+      let started = false
+      let active = true
+      let startupTimer: ReturnType<typeof setTimeout> | undefined
+      const startupDeadline = new Promise<SupervisorOutcome>(resolve => {
+        startupTimer = setTimeout(() => resolve({ kind: 'startup-timeout' }), startupWaitMs)
       })
-      .then<SupervisorOutcome>(() => ({ kind: 'stopped' }))
-      .catch<SupervisorOutcome>(error => ({ kind: 'failed', error }))
+      options.log('poll.boot', { botKey: options.botKey, generation })
+      const run = Promise.resolve()
+        .then(() => current.bot.start({
+          timeout: options.pollTimeoutSeconds,
+          onStart: async info => {
+            if (!active) throw new Error('Retired polling generation tried to start')
+            started = true
+            attempt = 0
+            options.log('poll.start', { botKey: options.botKey, generation: currentGeneration })
+            await options.onStart(info, currentGeneration)
+            if (!active) throw new Error('Retired polling generation completed startup')
+            if (startupTimer) clearTimeout(startupTimer)
+          },
+        }))
+        .then<SupervisorOutcome>(() => ({ kind: 'stopped' }))
+        .catch<SupervisorOutcome>(error => ({ kind: 'failed', error }))
 
-    const outcome = await Promise.race<SupervisorOutcome>([
-      run,
-      current.stalled.then(stall => ({ kind: 'stalled', stall })),
-      abortOutcome(options.signal),
-    ])
+      const outcome = await Promise.race<SupervisorOutcome>([
+        run,
+        current.stalled.then(stall => ({ kind: 'stalled', stall })),
+        startupDeadline,
+        aborted,
+      ])
+      active = false
+      if (startupTimer) clearTimeout(startupTimer)
 
-    if (outcome.kind === 'aborted') {
-      await Promise.race([current.bot.stop().catch(() => {}), sleep(stopWaitMs)])
-      return
-    }
-    if (outcome.kind === 'stopped') return
-    if (outcome.kind === 'failed') {
-      attempt++
-      const delayMs = retryDelayMs(attempt)
-      options.log('poll.failed', {
+      if (outcome.kind === 'aborted') {
+        await boundedWait(current.bot.stop().catch(() => {}), stopWaitMs)
+        return
+      }
+      if (outcome.kind === 'failed' || outcome.kind === 'stopped') {
+        attempt++
+        const delayMs = retryDelayMs(attempt)
+        options.log('poll.failed', {
+          botKey: options.botKey,
+          generation,
+          started,
+          detail: outcome.kind === 'failed' ? safeErrorDetail(outcome.error) : 'Polling stopped unexpectedly',
+          retryInMs: delayMs,
+        })
+        await Promise.race([sleep(delayMs), aborted])
+        continue
+      }
+
+      if (outcome.kind === 'startup-timeout') {
+        options.log('poll.start.timeout', { botKey: options.botKey, generation, timeoutMs: startupWaitMs })
+      }
+
+      const restartStartedAt = Date.now()
+      let stopOk = true
+      let stopped = false
+      const stop = current.bot.stop().catch(error => {
+        stopOk = false
+        options.log('poll.stop.error', {
+          botKey: options.botKey,
+          generation,
+          detail: safeErrorDetail(error),
+        })
+      })
+      const fenced = Promise.allSettled([stop, run]).then(() => {
+        stopped = true
+      })
+      await boundedWait(fenced, stopWaitMs)
+      if (!stopped) {
+        stopOk = false
+        options.log('poll.stop.timeout', { botKey: options.botKey, generation, timeoutMs: stopWaitMs })
+        // Starting another generation while this one can still receive updates
+        // risks duplicate pollers and lost/duplicated delivery. Let launchd heal
+        // the whole process rather than pretending the old poller was fenced.
+        options.log('poll.fatal', { botKey: options.botKey, generation, reason: 'generation-not-fenced' })
+        throw new Error(`Telegram polling ${options.botKey} generation ${generation} could not be fenced`)
+      }
+      options.log('poll.restart', {
         botKey: options.botKey,
-        generation,
-        started,
-        detail: safeErrorDetail(outcome.error),
-        retryInMs: delayMs,
+        fromGeneration: generation,
+        toGeneration: generation + 1,
+        reason: outcome.kind,
+        stalledSeq: outcome.kind === 'stalled' ? outcome.stall.seq : undefined,
+        stopOk,
+        ms: Date.now() - restartStartedAt,
       })
-      await Promise.race([sleep(delayMs), abortOutcome(options.signal)])
-      continue
     }
+  } finally {
+    options.signal?.removeEventListener('abort', onAbort)
+  }
+}
 
-    const restartStartedAt = Date.now()
-    let stopOk = true
-    let stopped = false
-    const stop = current.bot.stop().catch(error => {
-      stopOk = false
-      options.log('poll.stop.error', {
-        botKey: options.botKey,
-        generation,
-        detail: safeErrorDetail(error),
-      })
-    })
-    const fenced = Promise.allSettled([stop, run]).then(() => {
-      stopped = true
-    })
-    await Promise.race([fenced, sleep(stopWaitMs)])
-    if (!stopped) {
-      stopOk = false
-      options.log('poll.stop.timeout', { botKey: options.botKey, generation, timeoutMs: stopWaitMs })
-    }
-    options.log('poll.restart', {
-      botKey: options.botKey,
-      fromGeneration: generation,
-      toGeneration: generation + 1,
-      stalledSeq: outcome.stall.seq,
-      stopOk,
-      ms: Date.now() - restartStartedAt,
-    })
+async function boundedWait(operation: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([operation, new Promise<void>(resolve => { timer = setTimeout(resolve, timeoutMs) })])
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }

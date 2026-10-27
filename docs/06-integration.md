@@ -68,20 +68,37 @@ advancing. The bridge therefore supervises every bot separately. A completed
 and an over-deadline request causes only that bot's grammY generation to be
 stopped and replaced. Other bot pollers and outbound delivery remain live.
 
+Bootstrap is supervised too: `getMe` and `deleteWebhook` have a 30 s end-to-end
+deadline, including response parsing. Their errors bypass grammY's hidden
+bootstrap retry loop and are retried by our supervisor (1–15 s backoff). This
+matters after a network outage: before 0.28.8 a replacement could sleep inside
+`Bot.start()` for hours without ever reaching the guarded `getUpdates` path.
+An independent startup watchdog waits 5 s beyond the bootstrap deadline. If a
+generation cannot be stopped AND its `start()` promise settled within the stop
+fence (default 15 s), the process emits `poll.fatal` and exits nonzero so the host
+supervisor can restart it. It never silently abandons a poller or starts a new
+one alongside an unfenced generation. An unexpected clean exit is retried too.
+
 Structured stderr lines start with `telegram-runtime polling `. Monitor the
 JSON payload by `botKey` and `generation`:
 
 | Event | Meaning |
 |---|---|
+| `poll.boot` | a generation is entering bootstrap (not yet proof of polling) |
+| `poll.bootstrap.error` | bounded `getMe`/`deleteWebhook` failure, with method, duration and timeout flag |
+| `poll.start.timeout` | independent startup watchdog expired before `onStart` |
 | `poll.start` | a bot generation entered long polling |
 | `poll.heartbeat` | healthy completed cycles; `emptyCycles` explicitly counts ordinary no-message long polls, while `updates` counts returned updates |
-| `poll.error` | a non-stall transport failure (rate-limited to one line/minute per generation) |
+| `poll.error` | a transport or unsuccessful/invalid Bot API response (rate-limited to one line/minute per generation); not a healthy heartbeat |
 | `poll.stalled` | one `getUpdates` exceeded `deadlineMs`; alert-worthy and followed by self-healing |
 | `poll.restart` | the stalled generation was fenced and the next generation will start |
 | `poll.failed` | a generation exited with an error and will be retried with backoff |
+| `poll.fatal` | generation could not be fenced; runtime exits nonzero rather than leave a zombie |
 
 A monitor should alert immediately on `poll.stalled`, and require the matching
-`poll.restart` followed by `poll.start` for the same `botKey`. It should also
+`poll.restart` followed by `poll.start` AND `poll.heartbeat` for the same `botKey`.
+`poll.restart` alone is an attempt, not proof of recovery. Alert on
+`poll.start.timeout`/`poll.fatal` and repeated bootstrap failures. It should also
 alert if a started bot has no `poll.heartbeat` for longer than the configured
 heartbeat interval plus the stall deadline. Lack of inbound user messages is
 not a health signal: an idle bot reports healthy `emptyCycles`.
