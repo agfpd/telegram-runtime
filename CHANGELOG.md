@@ -10,6 +10,18 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.28.9] - 2026-10-30
+
+### Fixed
+
+- Prices in a peer's plain text no longer render as LaTeX. Rich Markdown parses
+  `$…$` as an inline formula, so a message like «около $5,5 млрд … ($1,5 млрд)»
+  showed everything between the first and last `$` as math, in a different
+  font and with the spaces eaten. On the rich path the bridge now escapes every
+  lone `$` outside code (`\$`). Explicit math (`$$…$$`, a ```` ```math ```` fence),
+  code spans, code fences and the `$USD` cashtag are left alone. Kill switch:
+  `TELEGRAM_RICH_DOLLAR_ESCAPE=0`.
+
 ## [0.28.8] - 2026-10-27
 
 ### Fixed

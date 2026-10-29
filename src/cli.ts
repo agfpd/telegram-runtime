@@ -130,6 +130,19 @@ const RICH_SPACER_LINE = '&nbsp;'
 // call site, one function.
 const RICH_HARDBREAK_ENABLED = process.env.TELEGRAM_RICH_HARDBREAK !== '0'
 const RICH_HARDBREAK_MARK = '  '
+// Currency-dollar escaping (defect 2026-10-30): Rich Markdown parses `$…$` as
+// an INLINE LaTeX formula (documented: "$x^2 + y^2$", "Formula source is treated
+// as raw LaTeX"). Peers write prices in plain prose all the time — "около $5,5
+// млрд. Раньше $2,8–3,3 млрд … ($1,5 млрд)" reached the owner with everything
+// between the first and last `$` typeset as math (other font, spaces eaten).
+// Invariant: a peer's plain text renders LITERALLY; markup appears only when the
+// author spelled it out. A lone `$` is currency, not an explicit formula request,
+// so the bridge backslash-escapes every single `$` outside code (`\$` renders as
+// a literal `$`; proven live — and the `$USD` cashtag is still recognised).
+// Explicit math stays: `$$…$$` (a run of 2+ dollars is left as is) and a ```math
+// fence (fences pass verbatim). Rich-path-only (MarkdownV2 has no math). Cheap to
+// remove: one env (TELEGRAM_RICH_DOLLAR_ESCAPE=0), one call site, one function.
+const RICH_DOLLAR_ESCAPE_ENABLED = process.env.TELEGRAM_RICH_DOLLAR_ESCAPE !== '0'
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
 // `.gif` is NOT a photo: Telegram's sendPhoto runs server-side image processing that
 // rejects GIFs (`Bad Request: IMAGE_PROCESS_FAILED`), so a GIF attachment was silently
@@ -4190,6 +4203,70 @@ export function hardenSoftBreaks(text: string): string {
   return lines.join('\n')
 }
 
+// Escape every LONE `$` outside code so the server-side Rich Markdown parser
+// cannot pair two of them into an inline formula (see RICH_DOLLAR_ESCAPE_ENABLED).
+//   - fence-aware: lines inside ``` / ~~~ (incl. ```math) pass verbatim;
+//   - inline code spans (a backtick run closed by an equal-length run on the same
+//     line) pass verbatim — a backslash there would render literally;
+//   - an existing backslash escape (`\$`, `\\`, …) is copied untouched, so the
+//     pass is idempotent and an author's own `\$` is not doubled;
+//   - a run of 2+ `$` (`$$E=mc^2$$`, explicit display math) is left as is.
+// Exported for tests.
+export function escapeCurrencyDollars(text: string): string {
+  const lines = text.split('\n')
+  let inFence = false
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li]
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence || !line.includes('$')) continue
+    let out = ''
+    let i = 0
+    while (i < line.length) {
+      const ch = line[i]
+      if (ch === '\\') {
+        out += line.slice(i, i + 2)
+        i += 2
+        continue
+      }
+      if (ch === '`') {
+        let n = 1
+        while (line[i + n] === '`') n++
+        const fence = '`'.repeat(n)
+        // Closing run must be exactly n backticks (not part of a longer run).
+        let close = -1
+        for (let k = line.indexOf(fence, i + n); k !== -1; k = line.indexOf(fence, k + 1)) {
+          if (line[k - 1] !== '`' && line[k + n] !== '`') {
+            close = k
+            break
+          }
+        }
+        if (close === -1) {
+          out += fence
+          i += n
+          continue
+        }
+        out += line.slice(i, close + n)
+        i = close + n
+        continue
+      }
+      if (ch === '$') {
+        let n = 1
+        while (line[i + n] === '$') n++
+        out += n === 1 ? '\\$' : '$'.repeat(n)
+        i += n
+        continue
+      }
+      out += ch
+      i++
+    }
+    lines[li] = out
+  }
+  return lines.join('\n')
+}
+
 // Try to deliver the WHOLE envelope text as one Bot API 10.1 rich message
 // (`rich_message.markdown` — Telegram parses the agent's GFM server-side).
 // Returns true when delivered; false hands the envelope to the legacy chunked
@@ -4384,7 +4461,8 @@ async function sendOutboundToTelegram(ctx: RuntimeContext, envelope: IapEnvelope
   // paragraphs into hard breaks — the spacer's &nbsp; lines sit between blanks and
   // are left untouched by the harden pass.
   const spacedText = RICH_SPACER_ENABLED ? spaceRichParagraphs(envelope.message) : envelope.message
-  const richText = RICH_HARDBREAK_ENABLED ? hardenSoftBreaks(spacedText) : spacedText
+  const hardenedText = RICH_HARDBREAK_ENABLED ? hardenSoftBreaks(spacedText) : spacedText
+  const richText = RICH_DOLLAR_ESCAPE_ENABLED ? escapeCurrencyDollars(hardenedText) : hardenedText
   const tryRich = RICH_OUTBOUND_ENABLED && richText.length <= MAX_RICH_TEXT
   // Newline fingerprint (counts only — zero content leak): GFM renders a blank
   // line (\n\n) as a paragraph break but space-joins a single \n (soft break),
