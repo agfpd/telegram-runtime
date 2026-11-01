@@ -17,6 +17,7 @@ export type FetchLike = (input: FetchInput, init?: RequestInit) => Promise<Respo
 export type GuardedPollingFetch = {
   fetch: FetchLike
   stalled: Promise<PollingStall>
+  healthy: Promise<void>
 }
 
 export type PollingFetchOptions = {
@@ -28,6 +29,7 @@ export type PollingFetchOptions = {
   stopStallMs: number
   heartbeatMs: number
   now?: () => number
+  recoveryMs?: number
 }
 
 class PollingDeadlineError extends Error {
@@ -108,6 +110,10 @@ export function createGuardedPollingFetch(options: PollingFetchOptions): Guarded
   const stalled = new Promise<PollingStall>(resolve => {
     resolveStall = resolve
   })
+  let resolveHealthy!: () => void
+  const healthy = new Promise<void>(resolve => { resolveHealthy = resolve })
+  let healthySince: number | undefined
+  let healthyCycles = 0
 
   let heartbeatAt = 0
   let heartbeatWindowStartedAt = now()
@@ -119,6 +125,8 @@ export function createGuardedPollingFetch(options: PollingFetchOptions): Guarded
   let lastErrorLogAt = 0
 
   const reportError = (error: unknown, requestSeq: number, startedAt: number): void => {
+    healthySince = undefined
+    healthyCycles = 0
     errors++
     const at = now()
     // A disconnected host can fail every three seconds via grammY's retry
@@ -137,6 +145,9 @@ export function createGuardedPollingFetch(options: PollingFetchOptions): Guarded
 
   const emitHeartbeat = (cycleMs: number): void => {
     const at = now()
+    healthySince ??= at
+    healthyCycles++
+    if (healthyCycles >= 3 && at - healthySince >= (options.recoveryMs ?? 120_000)) resolveHealthy()
     cycles++
     maxCycleMs = Math.max(maxCycleMs, cycleMs)
     if (heartbeatAt !== 0 && at - heartbeatAt < options.heartbeatMs) return
@@ -253,7 +264,7 @@ export function createGuardedPollingFetch(options: PollingFetchOptions): Guarded
     }
   }
 
-  return { fetch: guardedFetch, stalled }
+  return { fetch: guardedFetch, stalled, healthy }
 }
 
 export type PollingBot<TInfo> = {
@@ -264,6 +275,13 @@ export type PollingBot<TInfo> = {
 export type PollingGeneration<TBot> = {
   bot: TBot
   stalled: Promise<PollingStall>
+  healthy?: Promise<void>
+}
+
+/** Jitter prevents all bots retrying together after a shared network outage. */
+export function pollingRetryDelayMs(attempt: number, random = Math.random): number {
+  const base = Math.min(5000 * 2 ** Math.min(Math.max(attempt - 1, 0), 4), 60_000)
+  return Math.round(base * (0.8 + random() * 0.2))
 }
 
 /**
@@ -347,8 +365,13 @@ type SupervisorOutcome =
 export async function supervisePolling<TBot extends PollingBot<TInfo>, TInfo>(
   options: PollingSupervisorOptions<TBot, TInfo>,
 ): Promise<void> {
-  const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
-  const retryDelayMs = options.retryDelayMs ?? (attempt => Math.min(1000 * attempt, 15_000))
+  const sleep = options.sleep ?? (ms => new Promise<void>(resolve => {
+    const done = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', done); resolve() }
+    const timer = setTimeout(done, ms)
+    if (options.signal?.aborted) done()
+    else options.signal?.addEventListener('abort', done, { once: true })
+  }))
+  const retryDelayMs = options.retryDelayMs ?? pollingRetryDelayMs
   const stopWaitMs = options.stopWaitMs ?? 15_000
   const startupWaitMs = options.startupWaitMs ?? 35_000
   let generation = 0
@@ -369,6 +392,11 @@ export async function supervisePolling<TBot extends PollingBot<TInfo>, TInfo>(
       options.publish(current.bot, generation)
       let started = false
       let active = true
+      void current.healthy?.then(() => {
+        if (!active) return
+        if (attempt > 0) options.log('poll.recovered', { botKey: options.botKey, generation: currentGeneration, failures: attempt })
+        attempt = 0
+      })
       let startupTimer: ReturnType<typeof setTimeout> | undefined
       const startupDeadline = new Promise<SupervisorOutcome>(resolve => {
         startupTimer = setTimeout(() => resolve({ kind: 'startup-timeout' }), startupWaitMs)
@@ -380,7 +408,6 @@ export async function supervisePolling<TBot extends PollingBot<TInfo>, TInfo>(
           onStart: async info => {
             if (!active) throw new Error('Retired polling generation tried to start')
             started = true
-            attempt = 0
             options.log('poll.start', { botKey: options.botKey, generation: currentGeneration })
             await options.onStart(info, currentGeneration)
             if (!active) throw new Error('Retired polling generation completed startup')
@@ -413,6 +440,7 @@ export async function supervisePolling<TBot extends PollingBot<TInfo>, TInfo>(
           detail: outcome.kind === 'failed' ? safeErrorDetail(outcome.error) : 'Polling stopped unexpectedly',
           retryInMs: delayMs,
         })
+        options.log('poll.degraded', { botKey: options.botKey, generation, attempt, reason: outcome.kind, retryInMs: delayMs })
         await Promise.race([sleep(delayMs), aborted])
         continue
       }
@@ -454,6 +482,12 @@ export async function supervisePolling<TBot extends PollingBot<TInfo>, TInfo>(
         stopOk,
         ms: Date.now() - restartStartedAt,
       })
+      // Fence first, then back off. A successful bootstrap is not recovery:
+      // only sustained completed getUpdates cycles clear the failure streak.
+      attempt++
+      const delayMs = retryDelayMs(attempt)
+      options.log('poll.degraded', { botKey: options.botKey, generation, attempt, reason: outcome.kind, retryInMs: delayMs })
+      await Promise.race([sleep(delayMs), aborted])
     }
   } finally {
     options.signal?.removeEventListener('abort', onAbort)

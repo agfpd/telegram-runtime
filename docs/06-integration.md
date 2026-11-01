@@ -70,7 +70,7 @@ stopped and replaced. Other bot pollers and outbound delivery remain live.
 
 Bootstrap is supervised too: `getMe` and `deleteWebhook` have a 30 s end-to-end
 deadline, including response parsing. Their errors bypass grammY's hidden
-bootstrap retry loop and are retried by our supervisor (1–15 s backoff). This
+bootstrap retry loop and are retried by our supervisor. This
 matters after a network outage: before 0.28.8 a replacement could sleep inside
 `Bot.start()` for hours without ever reaching the guarded `getUpdates` path.
 An independent startup watchdog waits 5 s beyond the bootstrap deadline. If a
@@ -78,6 +78,14 @@ generation cannot be stopped AND its `start()` promise settled within the stop
 fence (default 15 s), the process emits `poll.fatal` and exits nonzero so the host
 supervisor can restart it. It never silently abandons a poller or starts a new
 one alongside an unfenced generation. An unexpected clean exit is retried too.
+
+Since 0.28.10 every replacement path, including a fenced stall, shares jittered
+exponential backoff: initially 4–5 seconds, then 8–10, 16–20, up to 48–60
+seconds. `poll.start` does not reset the failure streak. Recovery requires at
+least three valid completed long polls spanning 120 seconds without errors.
+Outbound remains available while a fenced poller waits for its next attempt.
+This bounds restart churn; it does not repair a broken network or claim healthy
+heartbeats while polling is unavailable.
 
 Structured stderr lines start with `telegram-runtime polling `. Monitor the
 JSON payload by `botKey` and `generation`:
@@ -93,6 +101,8 @@ JSON payload by `botKey` and `generation`:
 | `poll.stalled` | one `getUpdates` exceeded `deadlineMs`; alert-worthy and followed by self-healing |
 | `poll.restart` | the stalled generation was fenced and the next generation will start |
 | `poll.failed` | a generation exited with an error and will be retried with backoff |
+| `poll.degraded` | generation failed or was fenced; `attempt`, `reason`, `retryInMs` describe the next retry |
+| `poll.recovered` | sustained valid long polling reset a nonzero failure streak |
 | `poll.fatal` | generation could not be fenced; runtime exits nonzero rather than leave a zombie |
 
 A monitor should alert immediately on `poll.stalled`, and require the matching

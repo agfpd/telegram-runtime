@@ -4091,7 +4091,7 @@ function makePollingGeneration(
   const bot = new Bot(credential.token, { client: { fetch: guarded.fetch as typeof fetch } })
   guardPollingBootstrap(bot, { botKey, generation, timeoutMs: POLL_BOOTSTRAP_MS, log: logPolling })
   installBotHandlers(ctx, botKey, bot, credential)
-  return { bot, stalled: guarded.stalled }
+  return { bot, stalled: guarded.stalled, healthy: guarded.healthy }
 }
 
 async function startPolling(

@@ -4,6 +4,7 @@ import {
   createGuardedPollingFetch,
   guardPollingBootstrap,
   supervisePolling,
+  pollingRetryDelayMs,
   type FetchLike,
   type PollingGeneration,
   type PollingStall,
@@ -14,6 +15,75 @@ function telegramResponse(result: unknown): Response {
 }
 
 describe('per-bot polling liveness', () => {
+  test('retry delay is exponential, jittered and capped at one minute', () => {
+    expect([1, 2, 3, 7, 1000].map(n => pollingRetryDelayMs(n, () => 1))).toEqual([5000, 10000, 20000, 60000, 60000])
+    expect(pollingRetryDelayMs(7, () => 0)).toBe(48000)
+  })
+
+  test('bootstrap success and isolated heartbeat do not reset mixed failure backoff', async () => {
+    const controller = new AbortController()
+    const delays: number[] = []
+    const recovered: number[] = []
+    await supervisePolling({
+      botKey: 'flapping', pollTimeoutSeconds: 30,
+      makeGeneration: generation => {
+        let end!: () => void
+        let stall!: (value: PollingStall) => void
+        let healthy!: () => void
+        return {
+          healthy: new Promise<void>(resolve => { healthy = resolve }),
+          stalled: new Promise<PollingStall>(resolve => { stall = resolve }),
+          bot: {
+            async start(options) {
+              if (generation === 2) throw new Error('bootstrap failed')
+              await options.onStart?.({})
+              if (generation === 4) { healthy(); await Promise.resolve() }
+              if (generation === 5) { controller.abort(); return }
+              const run = new Promise<void>(resolve => { end = resolve })
+              stall({ botKey: 'flapping', generation, seq: 1, phase: 'long-poll', ageMs: 45, deadlineMs: 45 })
+              return run
+            },
+            async stop() { end?.() },
+          },
+        }
+      },
+      publish: () => {}, onStart: () => {}, signal: controller.signal,
+      retryDelayMs: attempt => { delays.push(attempt); return 0 },
+      log: (event, fields) => { if (event === 'poll.recovered') recovered.push(fields!.failures as number) },
+    })
+    expect(delays).toEqual([1, 2, 3, 1])
+    expect(recovered).toEqual([3])
+  })
+
+  test('recovery requires sustained valid long-poll cycles; errors reset the window', async () => {
+    let now = 0
+    let fail = false
+    let recovered = false
+    const guarded = createGuardedPollingFetch({
+      botKey: 'recovery', generation: 1, stallMs: 100, stopStallMs: 10, heartbeatMs: 1000,
+      now: () => now, recoveryMs: 120,
+      fetch: async () => fail ? Response.json({ ok: false }) : telegramResponse([]), log: () => {},
+    })
+    void guarded.healthy.then(() => { recovered = true })
+    const poll = () => guarded.fetch('https://api.telegram.org/botTOKEN/getUpdates', { body: '{"timeout":30}' })
+    await poll()
+    now = 120
+    fail = true
+    await poll()
+    fail = false
+    now = 130
+    await poll()
+    now = 180
+    await poll()
+    expect(recovered).toBe(false)
+    // Stop confirmation never counts toward recovery.
+    now = 260
+    await guarded.fetch('https://api.telegram.org/botTOKEN/getUpdates', { body: '{"limit":1}' })
+    expect(recovered).toBe(false)
+    await poll()
+    expect(recovered).toBe(true)
+  })
+
   for (const method of ['getMe', 'deleteWebhook'] as const) {
     for (const failure of ['network', 'api-503', 'body-hang'] as const) {
       test(`bootstrap ${method}: ${failure} escapes grammY hidden retries and recovers`, async () => {

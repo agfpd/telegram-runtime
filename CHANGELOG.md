@@ -10,6 +10,19 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.28.10] - 2026-11-01
+
+### Fixed
+
+- Repeated polling stalls now back off after fencing the old bot, just like
+  bootstrap failures. All replacement paths share exponential jittered retries
+  (4–5 seconds initially, capped at 48–60 seconds). Bootstrap success no longer
+  resets the failure streak: three valid polling cycles spanning at least 120
+  seconds without errors are required. This prevents a degraded network from
+  causing continuous bot-generation churn. `poll.degraded` reports the streak,
+  cause and next retry; `poll.recovered` confirms sustained polling recovery.
+- Added a credential-free socket-level flapping fixture for before/after proof.
+
 ## [0.28.9] - 2026-10-30
 
 ### Fixed

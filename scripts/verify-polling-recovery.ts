@@ -125,7 +125,7 @@ const running = impl.supervisePolling<Bot, Awaited<ReturnType<Bot['api']['getMe'
       botKey: 'isolated_probe_bot', generation: g, timeoutMs: 2000, log,
     })
     bot.on('message:text', async ctx => { await post('inbound', { text: ctx.message.text }) })
-    return { bot, stalled: guarded.stalled }
+    return { bot, stalled: guarded.stalled, healthy: guarded.healthy }
   },
   publish: (bot, g) => { currentBot = bot; generation = g },
   onStart: () => {},

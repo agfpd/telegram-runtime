@@ -38,5 +38,24 @@ Expected after evidence: `poll.stalled` → `poll.stop.error` (`stopOk=false` on
 restart. `probe.recovered.recoveryMs` is measured from fixture restoration.
 The default after run takes ~48 s. Evidence output must not already exist.
 
+Since 0.28.10 all replacement paths back off (including stalls); this adds the
+supervisor's jittered delay to recovery time. `poll.start` does not reset this
+delay. Only at least three valid polls spanning 120 seconds without errors do.
+
+Flapping acceptance against a real local HTTP fixture, without Telegram tokens:
+
+```sh
+git show 6ee6374:src/pollingSupervisor.ts > /tmp/polling-before-backoff.ts
+bun scripts/verify-polling-backoff.ts --supervisor /tmp/polling-before-backoff.ts --output /tmp/backoff-before.jsonl
+bun scripts/verify-polling-backoff.ts --output /tmp/backoff-after.jsonl
+```
+
+Both runs fence three hanging generations, then stop at the fourth startup.
+Before: no delay between fencing and the next boot. After: `poll.degraded` states
+the failure streak and actual retry delay (4–5, 8–10, 16–20 seconds). Production
+delays keep growing to a 48–60 second cap. The fixture uses a 100 ms stall
+deadline to avoid spending 135 seconds reproducing the already-tested timeout;
+retry delays are real, not accelerated. Neither run proves healthy host networking.
+
 Unit tests additionally exercise bootstrap transport errors and body hangs,
 startup-watchdog/fatal fencing, unexpected clean exits and API-error isolation.
