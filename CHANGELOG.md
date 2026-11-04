@@ -10,6 +10,20 @@ predates the public repository.
 
 ## [Unreleased]
 
+## [0.28.11] - 2026-11-04
+
+### Fixed
+
+- Peer message bodies are now literal text: `sendMessage` with no parse mode
+  replaces both rich Markdown and MarkdownV2. SQL underscores, backslashes,
+  backticks, stars, links and other markup-like characters remain visible.
+  Legacy `TELEGRAM_RICH*` switches no longer affect peer messages. Approval and
+  notice cards keep their own trusted formatting.
+- Chunking no longer removes newlines at boundaries or splits surrogate pairs.
+- Each accepted chunk logs `chunk.receipt`: API message id, exact text equality,
+  source/response SHA-256 and returned entities (without message bodies). A text
+  mismatch is surfaced as an error without retrying an already accepted message.
+
 ## [0.28.10] - 2026-11-01
 
 ### Fixed

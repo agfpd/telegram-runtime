@@ -42,7 +42,7 @@ Files and images travel both ways. Inbound from the person (photos, documents, a
 
 ## Text formatting
 
-The agent's replies arrive formatted — headings, lists, code, links render as they should in Telegram. The agent writes plain markdown; the bridge converts it to what Telegram displays correctly, splitting long messages into parts when needed.
+Peer replies arrive as literal text, not Markdown. Underscores, backslashes, backticks and other markup-like characters are preserved rather than interpreted. Long messages are split into parts without deleting characters. For designed formatting, send a document attachment; approval and notice cards retain their separately generated formatting.
 
 ## Human approval
 

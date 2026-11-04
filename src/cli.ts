@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { Bot, Context, GrammyError, HttpError } from 'grammy'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import {
   chmodSync,
   closeSync,
@@ -89,60 +89,10 @@ const POLL_STALL_MS =
 const POLL_STOP_STALL_MS = Number(process.env.TELEGRAM_POLL_STOP_STALL_MS ?? '') || 10_000
 const POLL_BOOTSTRAP_MS = Number(process.env.TELEGRAM_POLL_BOOTSTRAP_MS ?? '') || 30_000
 const POLL_HEARTBEAT_MS = Number(process.env.TELEGRAM_POLL_HEARTBEAT_MS ?? '') || 300_000
-// Rich messages (Bot API 10.1, released 2026-06-11): an outbound peer envelope
-// is sent as ONE rich message — `InputRichMessage.markdown` carries the agent's
-// GFM verbatim and Telegram parses it SERVER-SIDE ("Rich Markdown is compatible
-// with GitHub Flavored Markdown where possible"): headings, lists, tables,
-// quotes and code render natively on the owner's client. Doc limits: 32768
-// characters / 500 blocks (vs 4096 for sendMessage) — one rich send replaces
-// chunking for any realistic report. The call goes through `bot.api.raw`,
-// typed natively since grammy 1.44.0 (@grammyjs/types 3.28 ships the 10.1
-// `sendRichMessage` method). Every failure falls back to the legacy chunked
-// MarkdownV2→plain path — rich can degrade, never lose a message. Kill
-// switch: TELEGRAM_RICH=0.
-const RICH_OUTBOUND_ENABLED = process.env.TELEGRAM_RICH !== '0'
-// The docs say "32768 UTF-8 characters"; whether that counts code points or
-// UTF-8 bytes is unverified — we gate on JS .length as the approximation and
-// let a 400 "too long" fall back to the chunked path (graceful, message kept).
-const MAX_RICH_TEXT = 32768
-// Paragraph-spacing workaround (defect 2026-06-12): Telegram clients render
-// ADJACENT paragraph blocks with line breaks but NO vertical gap — the server
-// parses \n\n into separate paragraph blocks correctly (proven by the API
-// response echo), the air is lost at render time (owner screenshots). The
-// bridge compensates by inserting a spacer paragraph (a lone &nbsp;) between
-// two PLAIN paragraphs; structural blocks (headings, tables, lists, quotes,
-// code, dividers) already render with spacing and must NOT get spacers. The
-// feature is a day old client-side — this is deliberately CHEAP TO REMOVE:
-// one env (TELEGRAM_RICH_SPACER=0), one call site, one function.
-const RICH_SPACER_ENABLED = process.env.TELEGRAM_RICH_SPACER !== '0'
+// Historical rich/Markdown helpers remain exported for compatibility and tests.
+// Peer envelopes NEVER use them: IAP message text is literal, not markup.
 const RICH_SPACER_LINE = '&nbsp;'
-// Soft-break hardening (defect 2026-06-23): the rich path hands the agent's text
-// to Telegram's server-side GFM parser, which treats a single \n inside a
-// paragraph as a CommonMark SOFT break — it space-joins the two lines. So an
-// agent's natural multi-line plain text (bullets via •, ad-hoc lists, line-by-line
-// notes) collapses into one run-on line; only a blank line (\n\n) survives as a
-// break. The owner's bar: plain newlines must "just work" without the agent
-// padding with double newlines. The bridge hardens each in-paragraph soft break
-// into a GFM HARD break (two trailing spaces before the newline) so the line is
-// preserved — see hardenSoftBreaks. The legacy MarkdownV2 fallback path renders
-// \n literally and needs no such fix; this is rich-path-only. Cheap to remove
-// under a future client/server change: one env (TELEGRAM_RICH_HARDBREAK=0), one
-// call site, one function.
-const RICH_HARDBREAK_ENABLED = process.env.TELEGRAM_RICH_HARDBREAK !== '0'
 const RICH_HARDBREAK_MARK = '  '
-// Currency-dollar escaping (defect 2026-10-30): Rich Markdown parses `$…$` as
-// an INLINE LaTeX formula (documented: "$x^2 + y^2$", "Formula source is treated
-// as raw LaTeX"). Peers write prices in plain prose all the time — "около $5,5
-// млрд. Раньше $2,8–3,3 млрд … ($1,5 млрд)" reached the owner with everything
-// between the first and last `$` typeset as math (other font, spaces eaten).
-// Invariant: a peer's plain text renders LITERALLY; markup appears only when the
-// author spelled it out. A lone `$` is currency, not an explicit formula request,
-// so the bridge backslash-escapes every single `$` outside code (`\$` renders as
-// a literal `$`; proven live — and the `$USD` cashtag is still recognised).
-// Explicit math stays: `$$…$$` (a run of 2+ dollars is left as is) and a ```math
-// fence (fences pass verbatim). Rich-path-only (MarkdownV2 has no math). Cheap to
-// remove: one env (TELEGRAM_RICH_DOLLAR_ESCAPE=0), one call site, one function.
-const RICH_DOLLAR_ESCAPE_ENABLED = process.env.TELEGRAM_RICH_DOLLAR_ESCAPE !== '0'
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp'])
 // `.gif` is NOT a photo: Telegram's sendPhoto runs server-side image processing that
 // rejects GIFs (`Bad Request: IMAGE_PROCESS_FAILED`), so a GIF attachment was silently
@@ -293,6 +243,7 @@ type RuntimeContext = {
 }
 
 class TelegramRuntimeError extends Error {}
+class OutboundTextMismatchError extends TelegramRuntimeError {}
 
 function usage(): string {
   return `Usage:
@@ -825,19 +776,15 @@ export async function probeBotIdentity(
   return { ok: true, username }
 }
 
-function chunkText(text: string): string[] {
-  if (text.length <= MAX_TELEGRAM_TEXT) return [text]
+export function chunkText(text: string): string[] {
   const out: string[] = []
-  let rest = text
-  while (rest.length > MAX_TELEGRAM_TEXT) {
-    let cut = rest.lastIndexOf('\n\n', MAX_TELEGRAM_TEXT)
-    if (cut < MAX_TELEGRAM_TEXT / 2) cut = rest.lastIndexOf('\n', MAX_TELEGRAM_TEXT)
-    if (cut < MAX_TELEGRAM_TEXT / 2) cut = rest.lastIndexOf(' ', MAX_TELEGRAM_TEXT)
-    if (cut <= 0) cut = MAX_TELEGRAM_TEXT
-    out.push(rest.slice(0, cut))
-    rest = rest.slice(cut).replace(/^\n+/, '')
+  for (let offset = 0; offset < text.length;) {
+    let end = Math.min(offset + MAX_TELEGRAM_TEXT, text.length)
+    // UTF-16 offsets must never split an astral character between messages.
+    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1])) end--
+    out.push(text.slice(offset, end))
+    offset = end
   }
-  if (rest) out.push(rest)
   return out
 }
 
@@ -4334,28 +4281,12 @@ export async function sendRichResilient(bot: Bot, chatId: string, text: string):
 // underlying fetch, so a stuck call rejects (and the outbound queue keeps
 // moving) instead of hanging the whole channel. Polling (getUpdates) is
 // untouched: this timeout is scoped to outbound sends only.
-async function sendChunkResilient(
+export async function sendChunkResilient(
   bot: Bot,
   chatId: string,
   text: string,
   meta: { chunk: number; of: number } = { chunk: 1, of: 1 },
 ): Promise<void> {
-  // Convert agent GFM → valid Telegram MarkdownV2 once; reused across retries.
-  // The converter should never throw, but if it ever does on some pathological
-  // body, the message must NOT be lost: formatted=null routes the chunk straight
-  // to a plain send for every attempt.
-  let formatted: string | null
-  try {
-    formatted = toTelegramMarkdownV2(text)
-  } catch (convErr) {
-    formatted = null
-    logOutbound('chunk.markdown_convert_error', {
-      chatId,
-      chunk: meta.chunk,
-      of: meta.of,
-      detail: formatError(convErr),
-    })
-  }
   let lastErr: unknown
   for (let attempt = 0; attempt <= OUTBOUND_SEND_RETRIES; attempt++) {
     const startedAt = Date.now()
@@ -4370,35 +4301,23 @@ async function sendChunkResilient(
       queueDepth: outboundQueueDepth,
     })
     try {
-      try {
-        if (formatted === null) {
-          // Conversion failed above — send the original text plain.
-          await bot.api.sendMessage(chatId, text, undefined, AbortSignal.timeout(OUTBOUND_SEND_TIMEOUT_MS))
-        } else {
-          await bot.api.sendMessage(
-            chatId,
-            formatted,
-            { parse_mode: 'MarkdownV2' },
-            AbortSignal.timeout(OUTBOUND_SEND_TIMEOUT_MS),
-          )
-        }
-      } catch (err) {
-        // MarkdownV2 is strict: a special the converter missed makes the Bot API
-        // reject the whole message (400 "can't parse entities"), and escaping can
-        // push a chunk past the 4096 cap ("...is too long"). Rather than lose it,
-        // resend the ORIGINAL text as plain — formatting is dropped but the
-        // message arrives. Only those formatting-class 400s fall back here; a
-        // plain send that itself failed (formatted===null) and timeout/network/
-        // 429 bubble to the retry loop below unchanged.
-        if (formatted === null || !isFormattingError(err)) throw err
-        logOutbound('chunk.markdown_fallback', {
-          chatId,
-          chunk: meta.chunk,
-          of: meta.of,
-          attempt,
-          detail: (err as GrammyError).description,
-        })
-        await bot.api.sendMessage(chatId, text, undefined, AbortSignal.timeout(OUTBOUND_SEND_TIMEOUT_MS))
+      // No parser and no transformations, including on retries. Markdown-like
+      // syntax is ordinary text. Explicit empty entities request no formatting.
+      const sent = await bot.api.sendMessage(
+        chatId, text, { entities: [] }, AbortSignal.timeout(OUTBOUND_SEND_TIMEOUT_MS),
+      )
+      const textMatches = sent.text === text
+      const entities = sent.entities ?? []
+      logOutbound('chunk.receipt', {
+        chatId, chunk: meta.chunk, of: meta.of, messageId: sent.message_id,
+        textMatches, entities,
+        expectedSha256: createHash('sha256').update(text).digest('hex'),
+        receivedSha256: createHash('sha256').update(sent.text ?? '').digest('hex'),
+      })
+      if (!textMatches) {
+        // The API already accepted this message: retrying would duplicate it.
+        // Surface a contract violation without logging private message bodies.
+        throw new OutboundTextMismatchError('Telegram response text differs from literal outbound text')
       }
       logOutbound('chunk.ok', {
         chatId,
@@ -4409,6 +4328,7 @@ async function sendChunkResilient(
       })
       return
     } catch (err) {
+      if (err instanceof OutboundTextMismatchError) throw err
       lastErr = err
       const c = classifyOutboundError(err)
       logOutbound(c.kind === 'timeout' ? 'chunk.timeout' : 'chunk.error', {
@@ -4450,20 +4370,8 @@ async function sendOutboundToTelegram(ctx: RuntimeContext, envelope: IapEnvelope
   if (!bot || !credential) {
     throw new TelegramRuntimeError(`bot "${botKey}" is not loaded`)
   }
-  // Rich-first: one structured message via Bot API 10.1 when enabled and the
-  // text fits the rich limit; ANY rich failure falls through to the legacy
-  // chunked MarkdownV2→plain path, so an envelope is never lost to the rollout.
-  // Spacer + soft-break hardening applied on the rich path only (the legacy
-  // chunked path renders via MarkdownV2 where \n\n already shows air and a single
-  // \n already breaks the line); gate on the FINAL transformed length so the text
-  // that actually goes out is what was measured. Spacer first (it works on the
-  // agent's original \n\n paragraph structure), then harden the single \n inside
-  // paragraphs into hard breaks — the spacer's &nbsp; lines sit between blanks and
-  // are left untouched by the harden pass.
-  const spacedText = RICH_SPACER_ENABLED ? spaceRichParagraphs(envelope.message) : envelope.message
-  const hardenedText = RICH_HARDBREAK_ENABLED ? hardenSoftBreaks(spacedText) : spacedText
-  const richText = RICH_DOLLAR_ESCAPE_ENABLED ? escapeCurrencyDollars(hardenedText) : hardenedText
-  const tryRich = RICH_OUTBOUND_ENABLED && richText.length <= MAX_RICH_TEXT
+  // Literal transport is unconditional: TELEGRAM_RICH and old formatting
+  // toggles cannot opt peer messages back into destructive Markdown parsing.
   // Newline fingerprint (counts only — zero content leak): GFM renders a blank
   // line (\n\n) as a paragraph break but space-joins a single \n (soft break),
   // so "paragraphs merged into one flowing block" downstream is distinguishable
@@ -4472,7 +4380,7 @@ async function sendOutboundToTelegram(ctx: RuntimeContext, envelope: IapEnvelope
   logOutbound('envelope.start', {
     from: envelope.fromPersonality,
     botKey,
-    rich: tryRich,
+    rich: false,
     len: envelope.message.length,
     nlnl: (envelope.message.match(/\n\n/g) ?? []).length,
     nl: (envelope.message.match(/\n/g) ?? []).length,
@@ -4480,16 +4388,9 @@ async function sendOutboundToTelegram(ctx: RuntimeContext, envelope: IapEnvelope
     attachments: envelope.attachments.length,
     queueDepth: outboundQueueDepth,
   })
-  let mode: 'rich' | 'chunks' = 'chunks'
-  let chunksSent: number | undefined
-  if (tryRich && (await sendRichResilient(bot, ctx.ownerUserId, richText))) {
-    mode = 'rich'
-  } else {
-    const chunks = chunkText(envelope.message)
-    for (let i = 0; i < chunks.length; i++) {
-      await sendChunkResilient(bot, ctx.ownerUserId, chunks[i], { chunk: i + 1, of: chunks.length })
-    }
-    chunksSent = chunks.length
+  const chunks = chunkText(envelope.message)
+  for (let i = 0; i < chunks.length; i++) {
+    await sendChunkResilient(bot, ctx.ownerUserId, chunks[i], { chunk: i + 1, of: chunks.length })
   }
   for (const filePath of envelope.attachments) {
     await sendFileViaRawApi({ credential, chatId: ctx.ownerUserId, filePath })
@@ -4500,8 +4401,8 @@ async function sendOutboundToTelegram(ctx: RuntimeContext, envelope: IapEnvelope
   checkpointActivity(envelope.fromPersonality)
   logOutbound('envelope.done', {
     from: envelope.fromPersonality,
-    mode,
-    chunks: chunksSent,
+    mode: 'literal',
+    chunks: chunks.length,
     attachments: envelope.attachments.length,
   })
 }

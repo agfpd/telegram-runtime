@@ -28,15 +28,16 @@ If both the endpoint and the fallback fail, the voice arrives as a file. A trans
 
 ## Indicators and rich text
 
-All three are on by default; set the variable to `0` to turn one off:
+Indicators are on by default; set the variable to `0` to turn one off:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `TELEGRAM_TYPING` | on | the typing indicator while the agent works |
 | `TELEGRAM_ACTIVITY` | on | the activity stream, host-wide master switch (per-peer toggle is `/activity` in chat) |
 | `TELEGRAM_ACTIVITY_DEFAULT` | on | the activity default for a peer that hasn't set it |
-| `TELEGRAM_RICH` | on | rich-formatted messages (server-side markdown) |
-| `TELEGRAM_RICH_DOLLAR_ESCAPE` | on | show a lone `$` literally on the rich path (currency, not inline LaTeX); `$$…$$` math stays |
+
+Peer messages are literal text, not Markdown. Legacy `TELEGRAM_RICH*` settings
+are ignored for peer messages; no switch can enable destructive markup parsing.
 
 ## Owner-facing daemon surfaces
 
@@ -94,4 +95,4 @@ These come from the launch environment iapeer provides; you don't set them by ha
 
 ## Fixed values
 
-These are compiled in, not configurable: a message is chunked at 4096 characters (32768 for rich messages), an attachment is capped at 50 MB, and voice files (`.ogg`/`.oga`) are sent as Telegram voice messages.
+These are compiled in, not configurable: a message is chunked at 4096 characters, an attachment is capped at 50 MB, and voice files (`.ogg`/`.oga`) are sent as Telegram voice messages.
