@@ -3054,6 +3054,16 @@ const LIFECYCLE_TIMEOUT_MS: Record<'new' | 'compact', number> = {
   compact: Number(process.env.TELEGRAM_COMPACT_TIMEOUT_MS ?? '') || 300_000,
 }
 
+// argv for an OWNER lifecycle verb. `new` always carries `--force`: since iapeer
+// 0.4.162 a bare `iapeer new` refuses (exit 75, refused-busy) while a turn with a
+// core delivery is running — a guard against accidental restarts by agents and
+// scripts. The owner's /new (and /<runtime> switch) is the emergency lever for
+// exactly that hung-turn case, so it stays unconditional (boris' decision,
+// 04.11.2026). `compact` is not gated and takes no flag.
+export function lifecycleArgs(op: 'new' | 'compact', personality: string, runtime: string): string[] {
+  return op === 'new' ? ['new', personality, runtime, '--force'] : ['compact', personality, runtime]
+}
+
 // Spawn `iapeer <new|compact> <personality> <runtime>` for the peer bound to
 // this bot and feed the result back to the operator — the same shape as
 // handleStopCommand (`iapeer interrupt`). Contract fixed with iapeer (topic
@@ -3087,11 +3097,7 @@ export async function handleLifecycleCommand(
     // the peer's own bot — the name would duplicate what the chat already says.
     await bot.api.sendMessage(chatId, 'restarting session...').catch(() => {})
   }
-  const result = await runControlBinary(
-    bin,
-    [op, target.personality, target.runtime],
-    LIFECYCLE_TIMEOUT_MS[op],
-  )
+  const result = await runControlBinary(bin, lifecycleArgs(op, target.personality, target.runtime), LIFECYCLE_TIMEOUT_MS[op])
   const stdout = result.stdout.trim()
   const stderr = result.stderr.trim()
   logActivity(op, {
@@ -3214,7 +3220,7 @@ export async function handleRuntimeSwitchCommand(
   }
 
   // 2. Restart onto the (now-default) runtime.
-  const result = await runControlBinary(bin, ['new', target.personality, toRuntime], LIFECYCLE_TIMEOUT_MS.new)
+  const result = await runControlBinary(bin, lifecycleArgs('new', target.personality, toRuntime), LIFECYCLE_TIMEOUT_MS.new)
   const stdout = result.stdout.trim()
   const stderr = result.stderr.trim()
   logActivity('runtime-switch', {

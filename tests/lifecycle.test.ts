@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { handleLifecycleCommand, parseLifecycleCommand, runControlBinary } from '../src/cli.ts'
+import { handleLifecycleCommand, lifecycleArgs, parseLifecycleCommand, runControlBinary } from '../src/cli.ts'
 
 // Mirrors stop-handler.test.ts: a stub `iapeer` records argv and exits with a
 // scripted code, proving (a) the exact spawn contract (`<op> <personality>
@@ -65,7 +65,7 @@ describe('handleLifecycleCommand — spawn contract + feedback mapping', () => {
     installStub(0, 'new: claude-darwin fresh session up\n', '')
     const sent: string[] = []
     await handleLifecycleCommand(fakeBot(sent), '123', target, 'new')
-    expect(readFileSync(argvFile, 'utf8').trim()).toBe('new darwin claude')
+    expect(readFileSync(argvFile, 'utf8').trim()).toBe('new darwin claude --force')
     expect(sent).toEqual(['restarting session...', 'fresh session up'])
   })
 
@@ -123,3 +123,12 @@ describe('handleLifecycleCommand — spawn contract + feedback mapping', () => {
 })
 
 process.on('exit', () => rmSync(tmp, { recursive: true, force: true }))
+
+describe('lifecycleArgs — owner /new is unconditional (iapeer >= 0.4.162 busy gate)', () => {
+  test('new always carries --force so a hung turn cannot refuse the owner lever', () => {
+    expect(lifecycleArgs('new', 'darwin', 'codex')).toEqual(['new', 'darwin', 'codex', '--force'])
+  })
+  test('compact is not gated and takes no flag', () => {
+    expect(lifecycleArgs('compact', 'darwin', 'claude')).toEqual(['compact', 'darwin', 'claude'])
+  })
+})
