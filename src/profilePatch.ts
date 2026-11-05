@@ -1,4 +1,4 @@
-import { patchPeerProfile } from '@agfpd/iapeer/peer-profile'
+import { patchPeerProfile } from '../vendor/peer-profile.js'
 import { basename } from 'node:path'
 import { NAME_RE } from './constants.ts'
 

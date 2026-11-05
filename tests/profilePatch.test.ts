@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { ensureTelegramProfile, patchTelegramInterface } from '../src/profilePatch.ts'
 import { runSelfConfig } from '../src/selfConfig.ts'
 import { handleActivityCommand } from '../src/cli.ts'
+import { patchPeerProfile as corePatch } from '@agfpd/iapeer/peer-profile'
+import { PEER_PROFILE_PATCH_PROTOCOL } from '../vendor/peer-profile.js'
 
 const cli = join(import.meta.dir, '../src/cli.ts')
 const modulePath = join(import.meta.dir, '../src/profilePatch.ts')
@@ -117,6 +119,57 @@ test('prepare scaffolds a missing profile, then becomes a true no-op', () => {
     expect(statSync(f.path).ino).toBe(before.ino)
     expect(statSync(f.path).mtimeMs).toBe(before.mtimeMs)
   } finally { rmSync(f.cwd, { recursive: true, force: true }) }
+})
+
+test('generated writer interoperates with core protocol; mismatch preserves profile and marker', () => {
+  const f = fixture()
+  try {
+    const protocol = join(f.cwd, '.iapeer/.peer-profile.protocol')
+    corePatch(f.cwd, raw => { raw.approval_mode = 'yolo' })
+    expect(readFileSync(protocol, 'utf8')).toBe(`${PEER_PROFILE_PATCH_PROTOCOL}\n`)
+    patchTelegramInterface(f.cwd, { activity: true }, true)
+    expect(JSON.parse(readFileSync(f.path, 'utf8')).approval_mode).toBe('yolo')
+    for (const bad of ['2\n', '', 'invalid\n']) {
+      writeFileSync(protocol, bad)
+      const before = readFileSync(f.path, 'utf8')
+      expect(() => patchTelegramInterface(f.cwd, { activity: false }, true)).toThrow('protocol mismatch')
+      expect(readFileSync(f.path, 'utf8')).toBe(before)
+      expect(readFileSync(protocol, 'utf8')).toBe(bad)
+      expect(existsSync(f.lock)).toBe(false)
+    }
+  } finally { rmSync(f.cwd, { recursive: true, force: true }) }
+})
+
+test('protocol guard reads marker inside the shared lock, not before waiting', async () => {
+  const f = fixture()
+  let child: ReturnType<typeof Bun.spawn> | undefined
+  try {
+    const protocol = join(f.cwd, '.iapeer/.peer-profile.protocol')
+    writeFileSync(protocol, '1\n')
+    const before = readFileSync(f.path, 'utf8')
+    mkdirSync(f.lock)
+    child = Bun.spawn([process.execPath, '-e', `
+      import { patchTelegramInterface } from ${JSON.stringify(modulePath)};
+      console.log('ready');
+      patchTelegramInterface(${JSON.stringify(f.cwd)}, {activity: true}, true);
+    `], { stdout: 'pipe', stderr: 'pipe' })
+    const reader = (child.stdout as ReadableStream<Uint8Array>).getReader()
+    expect(new TextDecoder().decode((await reader.read()).value)).toContain('ready')
+    reader.releaseLock()
+    expect(await Promise.race([
+      child.exited.then(() => 'exited'), Bun.sleep(100).then(() => 'waiting'),
+    ])).toBe('waiting')
+    writeFileSync(protocol, '2\n')
+    rmSync(f.lock, { recursive: true })
+    expect(await child.exited).not.toBe(0)
+    expect(await new Response(child.stderr as ReadableStream).text()).toContain('protocol mismatch')
+    expect(readFileSync(f.path, 'utf8')).toBe(before)
+    expect(readFileSync(protocol, 'utf8')).toBe('2\n')
+  } finally {
+    child?.kill()
+    if (child) await child.exited
+    rmSync(f.cwd, { recursive: true, force: true })
+  }
 })
 
 test('activity handler patches only activity; lock timeout reports failure without an unlocked fallback', async () => {

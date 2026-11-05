@@ -14,6 +14,7 @@
   "files": [
     "CHANGELOG.md",
     "bin/",
+    "vendor/",
     "src/",
     "docs/*.md",
     "docs/ru/",
@@ -33,14 +34,16 @@
     "self-config": "bun src/cli.ts self-config",
     "doctor": "bun src/cli.ts doctor --json",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "vendor:generate": "bun scripts/generate-peer-profile.ts",
+    "vendor:check": "bun scripts/generate-peer-profile.ts --check"
   },
   "dependencies": {
-    "@agfpd/iapeer": "git+https://github.com/agfpd/iapeer.git#95a08490f8f868ce39c0f89413e1ca75fb63ee24",
     "grammy": "^1.44.0"
   },
-  "bundleDependencies": ["grammy", "@agfpd/iapeer"],
+  "bundleDependencies": ["grammy"],
   "devDependencies": {
+    "@agfpd/iapeer": "git+https://github.com/agfpd/iapeer.git#829c2e736a318d343bd7b6b45c0e073026b9e62a",
     "@types/bun": "latest",
     "typescript": "latest"
   }

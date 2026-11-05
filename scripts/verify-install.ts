@@ -23,8 +23,11 @@ if (hostHome) for (const dir of ['.local/bin', '.iapeer/docs', '.iapeer/runtimes
 mkdirSync(output, { recursive: true, mode: 0o700 })
 const pkg = resolve(import.meta.dir, '..')
 assert.ok(existsSync(join(pkg, 'node_modules/grammy/package.json')), 'archive must contain bundled runtime dependencies')
-assert.ok(existsSync(join(pkg, 'node_modules/@agfpd/iapeer/src/identity/patchPeerProfile.ts')),
-  'archive must contain the core cooperative profile writer (no host/registry fallback)')
+assert.ok(existsSync(join(pkg, 'vendor/peer-profile.js')), 'archive must contain the standalone core profile writer')
+assert.ok(!existsSync(join(pkg, 'node_modules/@agfpd/iapeer')), 'archive must not bundle the core dependency graph')
+const provenance = JSON.parse(readFileSync(join(pkg, 'vendor/peer-profile.provenance.json'), 'utf8'))
+assert.equal(createHash('sha256').update(readFileSync(join(pkg, 'vendor/peer-profile.js'))).digest('hex'),
+  provenance.bundleSha256, 'vendored writer must match its provenance')
 const { selfInstall } = await import(join(pkg, 'src/selfInstall.ts')) as typeof import('../src/selfInstall.ts')
 const { runInstallCommand } = await import(join(pkg, 'src/installSignature.ts')) as typeof import('../src/installSignature.ts')
 const version = JSON.parse(readFileSync(join(pkg, 'package.json'), 'utf8')).version as string

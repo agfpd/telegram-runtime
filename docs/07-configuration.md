@@ -104,6 +104,12 @@ closed, with no unlocked fallback. Do not delete a lock while a writer might
 still be running. Migration requires updating all profile writers together;
 an older bridge can still overwrite newer fields.
 
+The runtime ships a generated core writer, not the core dependency graph.
+`vendor/peer-profile.provenance.json` records upstream commit and SHA-256 hashes;
+CI regenerates it with pinned Bun. A persistent `.iapeer/.peer-profile.protocol`
+marker is checked inside the lock. An incompatible marker fails closed without
+rewriting the profile or marker; an operator must coordinate protocol migrations.
+
 ## Fixed values
 
 These are compiled in, not configurable: a message is chunked at 4096 characters, an attachment is capped at 50 MB, and voice files (`.ogg`/`.oga`) are sent as Telegram voice messages.

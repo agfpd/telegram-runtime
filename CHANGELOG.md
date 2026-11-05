@@ -19,6 +19,9 @@ predates the public repository.
   Activation requires a coordinated update of all profile writers, including
   the long-running bridge. This branch's temporary core git dependency must be
   replaced by exact registry version `0.4.165` before any release archive.
+- The core writer is a generated, provenance-hashed standalone leaf with a
+  persistent protocol-1 guard checked under the same lock. Core is build-only,
+  not a runtime dependency; CI regenerates the leaf and compares its bytes.
 
 ## [0.28.13] - 2026-11-05
 
