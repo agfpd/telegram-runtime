@@ -161,6 +161,29 @@ try {
   assert.match(success(entry, ['self-install']), /\(compiled\)/)
   verify(); executable(); assert.equal(hash(manifest), manifestHash)
   assert.deepEqual(tree(docs), tree(join(pkg, 'docs')))
+  // Exercise the shipped leaf through the compiled CLI, without core installed
+  // and without a human channel. The fixture lives only inside sandbox HOME.
+  const profileDir = join(env.HOME!, '.iapeer')
+  mkdirSync(profileDir, { recursive: true })
+  const profilePath = join(profileDir, 'peer-profile.json')
+  const protocolPath = join(profileDir, '.peer-profile.protocol')
+  const profileBytes = JSON.stringify({
+    personality: 'probe', default_runtime: 'codex', runtimes: ['codex'],
+    intelligence: 'artificial', future: { keep: true }, interfaces: { telegram: { activity: true } },
+  }) + '\n'
+  writeFileSync(profilePath, profileBytes)
+  success(bin, ['self-config'])
+  assert.equal(readFileSync(protocolPath, 'utf8'), '1\n')
+  assert.equal(readFileSync(profilePath, 'utf8'), profileBytes)
+  writeFileSync(protocolPath, '2\n')
+  const mismatch = command(bin, ['self-config'])
+  assert.equal(mismatch.status, 1)
+  assert.match(mismatch.stderr, /protocol mismatch/)
+  assert.equal(readFileSync(profilePath, 'utf8'), profileBytes)
+  assert.equal(readFileSync(protocolPath, 'utf8'), '2\n')
+  rmSync(profilePath)
+  rmSync(protocolPath)
+  record('native-profile-protocol-pass', { foreignFieldsPreserved: true, mismatchFailsClosed: true })
   if (!hostHome) {
     copy(bin, join(backup, 'telegram-runtime'))
     copy(manifest, join(backup, 'runtime.json'))
