@@ -113,6 +113,33 @@ alert if a started bot has no `poll.heartbeat` for longer than the configured
 heartbeat interval plus the stall deadline. Lack of inbound user messages is
 not a health signal: an idle bot reports healthy `emptyCycles`.
 
+### Polling health
+
+```sh
+telegram-runtime polling --log ~/.iapeer/logs/arthur/telegram-arthur.log --json
+```
+
+This reads at most the last 8 MiB of the specified log and the configured bot
+directory under `IAPEER_ROOT` (default `~/.iapeer`). It never reads bot tokens,
+calls Telegram, changes files or restarts processes. Set the log path explicitly
+to the running human peer's log. `doctor` is a separate configuration check and
+must run from that human peer's working directory.
+
+Every configured bot appears, even if it never reached `poll.start`. `healthy`
+requires a valid completed-cycle heartbeat within `--max-age-ms` (default 360000:
+5 minute heartbeat + 45 second stall deadline + margin). Tune this if the runtime
+uses a different heartbeat interval. A new boot/generation discards the old
+heartbeat, even when a process restart resets generation to 1. Error evidence
+means `degraded` until the next heartbeat; `poll.start` alone never clears it.
+Other states are `starting`, `stale` and `unknown` (no usable evidence or future
+timestamps beyond 5 seconds). Exit status is 0 only for a nonempty, all-healthy
+bot set, otherwise 1; unreadable logs and invalid options also exit 1.
+
+This is conservative log evidence, not an end-to-end message delivery probe.
+Truncated tails, log rotation or a wrong log path can yield `unknown`; a process
+that died just after a heartbeat can still appear fresh until the age limit.
+Use process health alongside it, not instead of it.
+
 ## Dependencies
 
 | Dependency | Required | Without it |

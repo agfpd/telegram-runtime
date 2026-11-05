@@ -10,6 +10,23 @@ predates the public repository.
 
 ## [Unreleased]
 
+### Fixed
+
+- Polling: the update offset now survives polling generations (per-bot
+  `createPollingCursor`). Previously a generation that died before Telegram
+  applied its offset made the next generation start at `offset=1` and deliver
+  the already-handled inbound message to the peer a second time. Reproduced and
+  verified on a local socket fixture: `scripts/verify-polling-cursor.ts`.
+- `doctor` no longer reports the shared approval service bot
+  (`TELEGRAM_BOT_ROLE=approval`) as "not mapped"; the missing `user_id` error
+  now says to run from the human peer cwd.
+
+### Added
+
+- `polling --log <runtime-log> [--max-age-ms] [--json]`: read-only per-bot
+  polling health from the runtime log (generation, heartbeat age); no Bot API
+  calls, not an end-to-end delivery probe.
+
 ## [0.28.11] - 2026-11-04
 
 ### Fixed

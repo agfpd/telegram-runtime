@@ -56,9 +56,12 @@ import { buildNoticeText } from './noticeCard.ts'
 import { BOT_USERNAME_RE, IAPEER_DIR, NAME_RE, PEER_PROFILE_FILE, RUNTIME } from './constants.ts'
 import { writeJsonAtomic } from './fsAtomic.ts'
 import { acquireProcessLock, type ReleaseLock } from './botLock.ts'
+import { DEFAULT_POLL_MAX_AGE_MS, pollingHealth, readPollingLogTail } from './pollingHealth.ts'
 import {
   createGuardedPollingFetch,
+  createPollingCursor,
   guardPollingBootstrap,
+  type PollingCursor,
   supervisePolling,
   type FetchLike,
   type PollingGeneration,
@@ -258,6 +261,7 @@ function usage(): string {
   telegram-runtime bot list [--json]
   telegram-runtime run
   telegram-runtime doctor [--json]
+  telegram-runtime polling --log <runtime-log> [--max-age-ms <ms>] [--json]
   telegram-runtime approvals [--json]   # face-side read of the daemon approval queue
   telegram-runtime notices [--json]     # face-side read of the daemon notice board (mute peers)
   telegram-runtime onboard-approval [--token <token> | --decline [--yes] | --status]`
@@ -4026,12 +4030,18 @@ function installBotHandlers(ctx: RuntimeContext, botKey: string, bot: Bot, crede
   })
 }
 
+// One cursor per bot for the process lifetime: generations come and go, the
+// update offset must not reset with them (see createPollingCursor).
+const pollingCursors = new Map<string, PollingCursor>()
+
 function makePollingGeneration(
   ctx: RuntimeContext,
   botKey: string,
   credential: BotCredential,
   generation: number,
 ): PollingGeneration<Bot> {
+  let cursor = pollingCursors.get(botKey)
+  if (!cursor) pollingCursors.set(botKey, cursor = createPollingCursor())
   const guarded = createGuardedPollingFetch({
     botKey,
     generation,
@@ -4043,6 +4053,8 @@ function makePollingGeneration(
   })
   const bot = new Bot(credential.token, { client: { fetch: guarded.fetch as typeof fetch } })
   guardPollingBootstrap(bot, { botKey, generation, timeoutMs: POLL_BOOTSTRAP_MS, log: logPolling })
+  // Before installBotHandlers: the cursor must see every update first.
+  cursor.install(bot)
   installBotHandlers(ctx, botKey, bot, credential)
   return { bot, stalled: guarded.stalled, healthy: guarded.healthy }
 }
@@ -4581,19 +4593,22 @@ async function doctorCommand(args: string[]): Promise<void> {
   const profile = readPeerProfile(process.cwd())
   if (!profile) problems.push(`${peerProfilePath(process.cwd())} missing`)
   const ownerUserId = profile ? telegramInterface(profile).user_id : undefined
-  if (profile && !ownerUserId) problems.push('current peer missing interfaces.telegram.user_id')
+  if (profile && !ownerUserId) problems.push('current peer missing interfaces.telegram.user_id; run doctor from the human peer cwd, not the agent/source directory')
   const directory = readPeerDirectory()
   const bots = listBotKeys().map(key => {
     const botEnv = readEnvFile(botEnvPath(key))
     const tokenConfigured = Boolean(botEnv.TELEGRAM_BOT_TOKEN)
     const target = directory.byTelegramBot.get(key)
     if (!tokenConfigured) problems.push(`bot ${key} missing TELEGRAM_BOT_TOKEN`)
-    if (!target) problems.push(`bot ${key} is not mapped by any peer interfaces.telegram.bot_username`)
+    const role = botEnv.TELEGRAM_BOT_ROLE?.trim() || null
+    // The shared service bot deliberately has no agent binding (Ф3 U4).
+    if (!target && role !== APPROVAL_BOT_ROLE) problems.push(`bot ${key} is not mapped by any peer interfaces.telegram.bot_username`)
     return {
       key,
       token_configured: tokenConfigured,
       username: botEnv.TELEGRAM_BOT_USERNAME ?? null,
       target_peer: target?.personality ?? null,
+      role,
     }
   })
   if (bots.length === 0) problems.push(`${botsRoot()} has no configured bots`)
@@ -4618,6 +4633,26 @@ async function doctorCommand(args: string[]): Promise<void> {
     for (const problem of problems) process.stdout.write(`- ${problem}\n`)
   }
   if (!result.ok) process.exitCode = 1
+}
+
+async function pollingCommand(args: string[]): Promise<void> {
+  const { flags } = parseFlags(args)
+  if (typeof flags.log !== 'string' || !flags.log) {
+    throw new TelegramRuntimeError('polling requires --log <runtime-log>; read-only, no Bot API calls')
+  }
+  const maxAgeMs = flags['max-age-ms'] === undefined ? DEFAULT_POLL_MAX_AGE_MS : Number(flags['max-age-ms'])
+  if (!Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1) {
+    throw new TelegramRuntimeError('--max-age-ms must be a positive integer')
+  }
+  const bots = pollingHealth(readPollingLogTail(flags.log), listBotKeys(), Date.now(), maxAgeMs)
+  const ok = bots.length > 0 && bots.every(bot => bot.status === 'healthy')
+  const result = { ok, log: flags.log, max_age_ms: maxAgeMs, bots }
+  if (flags.json) printJson(result)
+  else {
+    process.stdout.write(`${ok ? 'ok' : 'not ok'} (polling evidence; not an end-to-end delivery probe)\n`)
+    for (const bot of bots) process.stdout.write(`${bot.botKey} ${bot.status} generation=${bot.generation ?? '?'} heartbeat_age_ms=${bot.heartbeatAgeMs ?? '?'}\n`)
+  }
+  if (!ok) process.exitCode = 1
 }
 
 async function runCommand(): Promise<void> {
@@ -4968,6 +5003,9 @@ async function main(): Promise<void> {
       return
     case 'doctor':
       await doctorCommand(rest)
+      return
+    case 'polling':
+      await pollingCommand(rest)
       return
     case 'approvals':
       await approvalsCommand(rest)

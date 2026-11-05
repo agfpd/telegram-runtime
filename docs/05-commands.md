@@ -14,7 +14,8 @@ Commands are `telegram-runtime <command>`. Most bindings are easier to set throu
 | `interface human --user-id <id>` | Write the person's Telegram account into the current directory's profile. |
 | `interface bot <bot-username> --peer <agent>` | Bind a bot to an agent by its `@username` (write the binding into its profile). |
 | `prepare [--user-id <id>]` | Initialize the peer profile in the current directory, optionally setting the Telegram account at once. |
-| `doctor [--json]` | Chain check: profile, person's account, bot configuration and bindings, no bots without an agent. |
+| `doctor [--json]` | Configuration check from the **human peer's working directory**: profile, account, bot tokens and agent bindings. A `role=approval` service bot intentionally needs no agent binding. No network or polling liveness check. |
+| `polling --log <runtime-log> [--max-age-ms <ms>] [--json]` | Read-only polling evidence for every configured bot, including bots that never reached `poll.start`. Exits 0 only if all have a fresh heartbeat; see [polling health](06-integration.md#polling-health). |
 
 ## Human approval
 

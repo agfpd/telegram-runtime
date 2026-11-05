@@ -502,3 +502,49 @@ async function boundedWait(operation: Promise<unknown>, timeoutMs: number): Prom
     if (timer) clearTimeout(timer)
   }
 }
+
+/** Minimal grammY surface the cursor needs (kept structural for tests). */
+export type CursorBot = {
+  api: { config: { use(transformer: (prev: any, method: string, payload: any, signal?: any) => any): void } }
+  use(middleware: (ctx: { update: { update_id: number } }, next: () => Promise<void>) => unknown): unknown
+}
+
+export type PollingCursor = {
+  /** Highest update_id a generation of this bot has started handling (0 = none). */
+  readonly lastTried: number
+  /** Install on a fresh generation BEFORE any other middleware. */
+  install(bot: CursorBot): void
+}
+
+/**
+ * Per-bot update cursor that survives polling generations.
+ *
+ * grammY keeps its offset (`lastTriedUpdateId`) on the Bot instance, and a
+ * new generation starts at 0 → `getUpdates(offset=1)`. When the old
+ * generation died before Telegram applied its offset (next long poll and the
+ * stop-confirm both lost), the server still holds the handled updates and
+ * the new generation re-delivers them: one inbound message reaches the peer
+ * twice. The cursor records each update_id as handling starts (same point
+ * grammY records it) and raises every outgoing getUpdates offset to at least
+ * lastTried + 1. Same at-most-once semantics as a single long-lived Bot.
+ */
+export function createPollingCursor(): PollingCursor {
+  let lastTried = 0
+  return {
+    get lastTried() { return lastTried },
+    install(bot) {
+      bot.api.config.use((prev, method, payload, signal) => {
+        if (method === 'getUpdates' && lastTried > 0) {
+          const offset = typeof payload?.offset === 'number' ? payload.offset : 0
+          if (offset <= lastTried) payload = { ...payload, offset: lastTried + 1 }
+        }
+        return prev(method, payload, signal)
+      })
+      bot.use((ctx, next) => {
+        const id = ctx.update?.update_id
+        if (Number.isSafeInteger(id) && id > lastTried) lastTried = id
+        return next()
+      })
+    },
+  }
+}

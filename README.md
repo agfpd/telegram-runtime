@@ -41,6 +41,15 @@ Check the chain:
 telegram-runtime doctor
 ```
 
+Run `doctor` from the **human peer's working directory**, not this source tree.
+It checks configuration, not inbound liveness. For read-only polling evidence:
+
+```bash
+telegram-runtime polling --log ~/.iapeer/logs/arthur/telegram-arthur.log --json
+```
+
+Use your human peer's runtime log path. This does not contact Telegram or restart the bridge.
+
 ## What makes it different
 
 - **Transparent channel.** Agents get no Telegram tools — to an agent, the person is just a named peer. The same `send_to_peer` reaches a human and an AI alike.
