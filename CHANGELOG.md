@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Granular history begins at the initial public release (0.16.5); earlier work
 predates the public repository.
 
-## [Unreleased]
+## [0.28.14] - 2026-11-06
 
 ### Fixed
 
@@ -17,8 +17,8 @@ predates the public repository.
   lock; unrelated fields are never re-persisted from stale snapshots. Malformed
   profiles and lock timeouts fail closed, and unchanged profiles are not rewritten.
   Activation requires a coordinated update of all profile writers, including
-  the long-running bridge. This branch's temporary core git dependency must be
-  replaced by exact registry version `0.4.165` before any release archive.
+  the long-running bridge. The build-only core dependency is pinned to exact
+  registry version `0.4.165`.
 - The core writer is a generated, provenance-hashed standalone leaf with a
   persistent protocol-1 guard checked under the same lock. Core is build-only,
   not a runtime dependency; CI regenerates the leaf and compares its bytes.

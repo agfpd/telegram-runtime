@@ -1,6 +1,6 @@
 {
   "name": "@agfpd/telegram-runtime",
-  "version": "0.28.13",
+  "version": "0.28.14",
   "description": "Telegram runtime-router for IAP peers.",
   "repository": {
     "type": "git",
@@ -43,7 +43,7 @@
   },
   "bundleDependencies": ["grammy"],
   "devDependencies": {
-    "@agfpd/iapeer": "git+https://github.com/agfpd/iapeer.git#829c2e736a318d343bd7b6b45c0e073026b9e62a",
+    "@agfpd/iapeer": "0.4.165",
     "@types/bun": "latest",
     "typescript": "latest"
   }
