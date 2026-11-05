@@ -1,6 +1,6 @@
 {
   "name": "@agfpd/telegram-runtime",
-  "version": "0.28.12",
+  "version": "0.28.13",
   "description": "Telegram runtime-router for IAP peers.",
   "repository": {
     "type": "git",
@@ -22,6 +22,9 @@
     "scripts/verify-polling-recovery.ts",
     "scripts/verify-polling-recovery.md",
     "scripts/verify-polling-backoff.ts",
+    "scripts/verify-polling-cursor.ts",
+    "scripts/verify-opencode-face.ts",
+    "scripts/verify-opencode-face.md",
     "tsconfig.json"
   ],
   "scripts": {

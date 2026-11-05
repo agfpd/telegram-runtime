@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Granular history begins at the initial public release (0.16.5); earlier work
 predates the public repository.
 
-## [Unreleased]
+## [0.28.13] - 2026-11-05
 
 ### Fixed
 
@@ -26,6 +26,18 @@ predates the public repository.
 - `polling --log <runtime-log> [--max-age-ms] [--json]`: read-only per-bot
   polling health from the runtime log (generation, heartbeat age); no Bot API
   calls, not an end-to-end delivery probe.
+- Standalone native OpenCode face probe: real native bash approvals
+  (allow/deny/timeout), HTTP 401 → core mute watch → Fleet SSE → Telegram
+  renderers, with approvals disabled for the notice check. Captures HTML only,
+  not real Telegram delivery; requires an iapeer checkout and native OpenCode.
+- Ship the polling-cursor reproduction probe in the npm archive.
+
+## [0.28.12] - 2026-11-04
+
+### Fixed
+
+- Owner `/new` remains unconditional with the busy-endpoint gate in iapeer
+  0.4.162 (`new --now`).
 
 ## [0.28.11] - 2026-11-04
 
