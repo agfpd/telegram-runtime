@@ -27,12 +27,12 @@
 // `configured` (a no-op that confirms state); the operator can complete user_id/bot
 // later via the `interface`/`bot` verbs.
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { basename, join } from 'path'
 import { IAPEER_DIR, NAME_RE, PEER_PROFILE_FILE, RUNTIME } from './constants.ts'
 import { resolveIapeerRoot } from './manifest.ts'
-import { writeJsonAtomic } from './fsAtomic.ts'
+import { patchTelegramInterface } from './profilePatch.ts'
 
 export interface SelfConfigOptions {
   env?: NodeJS.ProcessEnv
@@ -79,20 +79,6 @@ function peerProfilePath(cwd: string): string {
   return join(cwd, IAPEER_DIR, PEER_PROFILE_FILE)
 }
 
-/** Read the peer profile as a RAW object (no typed coercion) so every foundation-
- *  provisioned field — especially `intelligence` — round-trips untouched. Returns {}
- *  when the file is absent or malformed (nothing to preserve in the malformed case). */
-function readRawProfile(path: string): Record<string, unknown> {
-  if (!existsSync(path)) return {}
-  try {
-    const raw = JSON.parse(readFileSync(path, 'utf8'))
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
-  } catch {
-    // malformed → start clean (nothing valid to preserve)
-  }
-  return {}
-}
-
 /** Write a bot credential .env under the IAPEER_ROOT-aware bots registry — the SAME
  *  path `telegram-runtime run` reads (cli.ts botEnvPath). Idempotent: re-running with
  *  the same token rewrites identical content. */
@@ -120,7 +106,8 @@ function writeBotCredential(
  * peer-profile.json `interfaces.telegram`, PRESERVING every other field — most
  * importantly the foundation-provisioned `intelligence` (natural). When a bot token is
  * supplied, also writes its credential .env into the IAPEER_ROOT-aware bots registry.
- * Atomic tmp+rename. Returns what was configured.
+ * Uses the core cooperative profile lock. Invalid JSON fails closed.
+ * Returns what was configured.
  */
 export function runSelfConfig(opts: SelfConfigOptions = {}): SelfConfigOutcome {
   const env = opts.env ?? process.env
@@ -128,36 +115,16 @@ export function runSelfConfig(opts: SelfConfigOptions = {}): SelfConfigOutcome {
   const personality = resolvePersonality(env, cwd)
   const profilePath = peerProfilePath(cwd)
 
-  const profile = readRawProfile(profilePath)
-
   // Operator-supplied telegram presence (env, forwarded by the foundation). The bot
   // @username (TELEGRAM_BOT_USERNAME) is the natural key.
   const userId = trimmed(env.TELEGRAM_USER_ID)
   const botUsername = normalizeBotUsername(env.TELEGRAM_BOT_USERNAME)
   const token = trimmed(env.TELEGRAM_BOT_TOKEN)
 
-  // Merge interfaces.telegram (preserve any existing telegram fields, e.g. an operator-
-  // set `activity` flag). Only set user_id/bot_username when provided — never blank out.
-  const interfaces =
-    profile.interfaces && typeof profile.interfaces === 'object' && !Array.isArray(profile.interfaces)
-      ? { ...(profile.interfaces as Record<string, unknown>) }
-      : {}
-  const telegram =
-    (interfaces as { telegram?: unknown }).telegram &&
-    typeof (interfaces as { telegram?: unknown }).telegram === 'object'
-      ? { ...((interfaces as { telegram: Record<string, unknown> }).telegram) }
-      : {}
-  if (userId) telegram.user_id = userId
-  // The @username IS the catalog key and also names the credential dir bots/<username>/.
-  if (botUsername) telegram.bot_username = botUsername
-  ;(interfaces as Record<string, unknown>).telegram = telegram
-
-  // Identity stays the foundation's domain — spread the raw profile FIRST so every
-  // provisioned field (intelligence=natural, personality, runtimes, description, and
-  // any unknown adjacent-contract fields) is preserved; only `interfaces` is replaced.
-  const merged: Record<string, unknown> = { ...profile, interfaces }
-
-  writeJsonAtomic(profilePath, merged)
+  patchTelegramInterface(cwd, {
+    ...(userId ? { user_id: userId } : {}),
+    ...(botUsername ? { bot_username: botUsername } : {}),
+  })
 
   let botEnvPath: string | undefined
   if (botUsername && token) {

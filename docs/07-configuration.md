@@ -93,6 +93,17 @@ These come from the launch environment iapeer provides; you don't set them by ha
 | `TELEGRAM_RUNTIME_IAPEER_BIN` | resolved | path to the `iapeer` binary for control commands |
 | `IAP_BIN` | `iapeer` | the binary used to deliver messages to peers |
 
+## Profile writes
+
+`prepare`, `interface`, `self-config` and the live `/activity` handler patch only
+their own fields through the core cooperative profile lock
+(`<peer-cwd>/.iapeer/.peer-profile.lock`). Profile reads for mutation happen
+inside the lock; unrelated fields and unchanged file bytes are preserved.
+Malformed JSON, filesystem errors and lock contention beyond 2 seconds fail
+closed, with no unlocked fallback. Do not delete a lock while a writer might
+still be running. Migration requires updating all profile writers together;
+an older bridge can still overwrite newer fields.
+
 ## Fixed values
 
 These are compiled in, not configurable: a message is chunked at 4096 characters, an attachment is capped at 50 MB, and voice files (`.ogg`/`.oga`) are sent as Telegram voice messages.

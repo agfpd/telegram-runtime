@@ -54,7 +54,7 @@ import { buildNoticeText } from './noticeCard.ts'
 // modules import them too). Imported here rather than re-declared so a grammar
 // change (e.g. NAME_RE) is made ONCE, not in two places.
 import { BOT_USERNAME_RE, IAPEER_DIR, NAME_RE, PEER_PROFILE_FILE, RUNTIME } from './constants.ts'
-import { writeJsonAtomic } from './fsAtomic.ts'
+import { ensureTelegramProfile, patchTelegramInterface } from './profilePatch.ts'
 import { acquireProcessLock, type ReleaseLock } from './botLock.ts'
 import { DEFAULT_POLL_MAX_AGE_MS, pollingHealth, readPollingLogTail } from './pollingHealth.ts'
 import {
@@ -137,7 +137,7 @@ type TelegramInterface = {
 // legacy value (human→natural, scripted→absent) at its boundary BEFORE an envelope
 // or a provisioned profile reaches this runtime, so only the current vocabulary is
 // accepted here — byte-identical to notifier-runtime's envelope set. Values still
-// round-trip verbatim through readPeerProfile/writePeerProfile (preserve, never
+// round-trip verbatim through profile reads/locked patches (preserve, never
 // re-derive identity — the pilot-notifier lesson selfConfig.ts guards).
 type Intelligence = 'natural' | 'artificial' | 'absent'
 
@@ -436,7 +436,7 @@ function readPeerProfile(cwd = process.cwd()): PeerProfile | null {
     intelligence,
     // expansion и interfaces round-trip'ятся verbatim (sanitize в точке
     // использования — resolveAliases): typed-парс здесь терял бы незнакомые
-    // сиблинги при последующем writePeerProfile.
+    // сиблинги при чтении. Запись меняет только свои поля под lock.
     ...(raw.expansion && typeof raw.expansion === 'object' && !Array.isArray(raw.expansion)
       ? { expansion: raw.expansion }
       : {}),
@@ -506,40 +506,6 @@ export function resolveAliases(profile: PeerProfile | null): Record<string, stri
   return undefined
 }
 
-function writePeerProfile(cwd: string, profile: PeerProfile): void {
-  // Preserve unknown fields на round-trip. telegram-runtime PeerProfile type
-  // содержит только runtime-relevant поля (personality/runtime/runtimes/
-  // description/intelligence/expansion/interfaces); поля смежных контрактов
-  // (например initial_prompt от Persistent-Peer §3.3.1) telegram-runtime не
-  // парсит, но обязан сохранять — иначе interface bot/human команды молча
-  // их теряют. Read-before-write merge поверх существующего файла.
-  const path = peerProfilePath(cwd)
-  let existing: Record<string, unknown> = {}
-  try {
-    if (existsSync(path)) {
-      const raw = JSON.parse(readFileSync(path, 'utf8'))
-      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-        existing = raw as Record<string, unknown>
-      }
-    }
-  } catch {
-    // невалидный файл — пишем чистую typed версию (потери unknown нет, их и не было)
-  }
-  const merged: Record<string, unknown> = {
-    ...existing,
-    ...profile,
-  }
-  // Canonical runtime field is `default_runtime` — the foundation retired the legacy
-  // `runtime` mirror (registry-side in iapeer 0.4.10). `...profile` carries the resolved
-  // runtime; persist it as default_runtime and DROP the mirror so a local mutation
-  // (interface/activity) never re-introduces the field readPeerProfile no longer
-  // requires. The resolved value equals the existing default_runtime (it was read from
-  // it), so identity round-trips unchanged — this only stops re-seeding the mirror.
-  merged.default_runtime = profile.runtime
-  delete merged.runtime
-  writeJsonAtomic(path, merged)
-}
-
 function unique<T>(values: readonly T[]): T[] {
   const out: T[] = []
   for (const value of values) {
@@ -550,26 +516,8 @@ function unique<T>(values: readonly T[]): T[] {
 
 function ensureCurrentProfile(cwd = process.cwd()): PeerProfile {
   ensureScaffold(cwd)
-  const existing = readPeerProfile(cwd)
-  if (existing) {
-    if (!existing.runtimes.includes(RUNTIME)) {
-      const updated = { ...existing, runtimes: unique([...existing.runtimes, RUNTIME]) }
-      writePeerProfile(cwd, updated)
-      return updated
-    }
-    return existing
-  }
-  const personality = normalizeName(basename(cwd))
-  assertName(personality, 'cwd basename')
-  const profile: PeerProfile = {
-    personality,
-    runtime: RUNTIME,
-    runtimes: [RUNTIME],
-    description: '',
-    intelligence: defaultIntelligenceForRuntime(RUNTIME),
-  }
-  writePeerProfile(cwd, profile)
-  return profile
+  ensureTelegramProfile(cwd)
+  return readPeerProfile(cwd)!
 }
 
 function telegramInterface(profile: PeerProfile): TelegramInterface {
@@ -578,21 +526,6 @@ function telegramInterface(profile: PeerProfile): TelegramInterface {
   if (!telegram || typeof telegram !== 'object') return {}
   return telegram as TelegramInterface
 }
-
-function setTelegramInterface(profile: PeerProfile, patch: TelegramInterface): PeerProfile {
-  const current = telegramInterface(profile)
-  return {
-    ...profile,
-    interfaces: {
-      ...(profile.interfaces ?? {}),
-      telegram: {
-        ...current,
-        ...patch,
-      },
-    },
-  }
-}
-
 /** Resolve a peer's bot catalog key — the value that names its credential dir and
  *  keys inbound/outbound routing. Source is `bot_username` (normalized). Returns
  *  undefined for a peer with no telegram bot (e.g. the human owner). */
@@ -2915,7 +2848,7 @@ export function parseRuntimeSwitchCommand(text: string, candidates: readonly str
   return candidates.includes(m[1]!) ? m[1]! : null
 }
 
-async function handleActivityCommand(
+export async function handleActivityCommand(
   bot: Bot,
   chatId: string,
   target: PeerRecord,
@@ -2930,11 +2863,7 @@ async function handleActivityCommand(
   }
   const want = cmd === 'on'
   try {
-    const profile = readPeerProfile(target.cwd)
-    if (!profile) {
-      throw new TelegramRuntimeError(`profile for ${target.personality} not found at ${target.cwd}`)
-    }
-    writePeerProfile(target.cwd, setTelegramInterface(profile, { activity: want }))
+    patchTelegramInterface(target.cwd, { activity: want }, true)
     logActivity('toggle', { peer: target.personality, on: want })
     await bot.api
       .sendMessage(
@@ -4478,8 +4407,8 @@ async function prepareCommand(args: string[]): Promise<void> {
   let profile = ensureCurrentProfile()
   const userId = stringFlag(flags, 'user-id')
   if (userId) {
-    profile = setTelegramInterface(profile, { user_id: userId })
-    writePeerProfile(process.cwd(), profile)
+    patchTelegramInterface(process.cwd(), { user_id: userId }, true)
+    profile = readPeerProfile()!
   }
   process.stdout.write(`${peerProfilePath(process.cwd())}\n`)
   printJson(profile)
@@ -4491,9 +4420,9 @@ async function interfaceCommand(args: string[]): Promise<void> {
   if (sub === 'human') {
     const userId = stringFlag(flags, 'user-id')
     if (!userId) throw new TelegramRuntimeError('interface human requires --user-id')
-    const profile = setTelegramInterface(ensureCurrentProfile(), { user_id: userId })
-    writePeerProfile(process.cwd(), profile)
-    printJson(profile)
+    ensureCurrentProfile()
+    patchTelegramInterface(process.cwd(), { user_id: userId }, true)
+    printJson(readPeerProfile())
     return
   }
   if (sub === 'bot') {
@@ -4506,13 +4435,10 @@ async function interfaceCommand(args: string[]): Promise<void> {
     assertName(peer, 'peer')
     const path = findPeerProfilePath(peer)
     const cwd = dirname(dirname(path))
-    const profile = readPeerProfile(cwd)
-    if (!profile) throw new TelegramRuntimeError(`${path} missing`)
     // The profile carries the bot @username as the natural key; it also names the
     // credential dir bots/<username>/.env.
-    const updated = setTelegramInterface(profile, { bot_username: username })
-    writePeerProfile(cwd, updated)
-    printJson(updated)
+    patchTelegramInterface(cwd, { bot_username: username }, true)
+    printJson(readPeerProfile(cwd))
     return
   }
   throw new TelegramRuntimeError(usage())

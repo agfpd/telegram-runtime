@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Granular history begins at the initial public release (0.16.5); earlier work
 predates the public repository.
 
+## [Unreleased]
+
+### Fixed
+
+- All profile writers (`prepare`, `interface`, `self-config`, `/activity`) use
+  the core cooperative patch API. Reads for mutation happen inside the shared
+  lock; unrelated fields are never re-persisted from stale snapshots. Malformed
+  profiles and lock timeouts fail closed, and unchanged profiles are not rewritten.
+  Activation requires a coordinated update of all profile writers, including
+  the long-running bridge. This branch's temporary core git dependency must be
+  replaced by exact registry version `0.4.165` before any release archive.
+
 ## [0.28.13] - 2026-11-05
 
 ### Fixed

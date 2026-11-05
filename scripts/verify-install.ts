@@ -23,6 +23,8 @@ if (hostHome) for (const dir of ['.local/bin', '.iapeer/docs', '.iapeer/runtimes
 mkdirSync(output, { recursive: true, mode: 0o700 })
 const pkg = resolve(import.meta.dir, '..')
 assert.ok(existsSync(join(pkg, 'node_modules/grammy/package.json')), 'archive must contain bundled runtime dependencies')
+assert.ok(existsSync(join(pkg, 'node_modules/@agfpd/iapeer/src/identity/patchPeerProfile.ts')),
+  'archive must contain the core cooperative profile writer (no host/registry fallback)')
 const { selfInstall } = await import(join(pkg, 'src/selfInstall.ts')) as typeof import('../src/selfInstall.ts')
 const { runInstallCommand } = await import(join(pkg, 'src/installSignature.ts')) as typeof import('../src/installSignature.ts')
 const version = JSON.parse(readFileSync(join(pkg, 'package.json'), 'utf8')).version as string
