@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Granular history begins at the initial public release (0.16.5); earlier work
 predates the public repository.
 
+## [0.29.0] - 2026-11-09
+
+### Added
+
+- Peer messages are formatted again, without a server-side parser. The new
+  `src/outboundFormat.ts` renders a strict Markdown subset into explicit Telegram
+  entities: fenced blocks (`pre`, language kept, tap to copy), inline code
+  (tap to copy exactly the fragment), `**bold**`, `~~strike~~`, `[text](https://…)`,
+  `# heading` as bold. Code content is byte-exact. Everything else stays literal:
+  no `_`/`*` italics, no `__bold__`, no spoilers, no backslash escapes; unclosed or
+  ill-flanked delimiters remain visible. Only delimiters of a recognised span are
+  removed, so the 0.28.11 guarantee for SQL, paths and `_ % \ $ *` holds.
+- Chunking keeps a code block that would straddle the 4096 limit whole, splits at
+  newlines, keeps ≤100 entities per message and trims edge whitespace the Bot API
+  would trim anyway.
+- `chunk.receipt` adds `entitiesSent` and `entitiesMatch` (coverage check against
+  server normalisation); a 400 on entities emits `chunk.fallback` and resends the
+  same chunk unstyled with link URLs inline. `TELEGRAM_FORMAT=0` restores fully
+  literal delivery.
+
 ## [0.28.14] - 2026-11-06
 
 ### Fixed

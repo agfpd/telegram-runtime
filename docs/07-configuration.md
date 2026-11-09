@@ -35,9 +35,10 @@ Indicators are on by default; set the variable to `0` to turn one off:
 | `TELEGRAM_TYPING` | on | the typing indicator while the agent works |
 | `TELEGRAM_ACTIVITY` | on | the activity stream, host-wide master switch (per-peer toggle is `/activity` in chat) |
 | `TELEGRAM_ACTIVITY_DEFAULT` | on | the activity default for a peer that hasn't set it |
+| `TELEGRAM_FORMAT` | on | strict-subset formatting of peer messages (docs/04); `0` = send fully literal |
 
-Peer messages are literal text, not Markdown. Legacy `TELEGRAM_RICH*` settings
-are ignored for peer messages; no switch can enable destructive markup parsing.
+No server-side Markdown parsing is ever used for peer messages. Legacy
+`TELEGRAM_RICH*` settings are ignored.
 
 ## Owner-facing daemon surfaces
 

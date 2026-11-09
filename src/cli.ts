@@ -49,6 +49,7 @@ import {
   parseCallbackData,
 } from './approvalCard.ts'
 import { buildNoticeText } from './noticeCard.ts'
+import { chunkFormatted, entitiesDelivered, formatOutbound, plainFallback, type Formatted, type OutEntity } from './outboundFormat.ts'
 // NAME_RE / RUNTIME / IAPEER_DIR / PEER_PROFILE_FILE are the shared ecosystem
 // contract values — single source of truth in constants.ts (the sibling contract
 // modules import them too). Imported here rather than re-declared so a grammar
@@ -4231,9 +4232,12 @@ export async function sendRichResilient(bot: Bot, chatId: string, text: string):
 export async function sendChunkResilient(
   bot: Bot,
   chatId: string,
-  text: string,
+  input: string | Formatted,
   meta: { chunk: number; of: number } = { chunk: 1, of: 1 },
 ): Promise<void> {
+  let text = typeof input === 'string' ? input : input.text
+  // Entities are computed client-side (outboundFormat); a plain string carries none.
+  let entities: OutEntity[] = typeof input === 'string' ? [] : input.entities
   let lastErr: unknown
   for (let attempt = 0; attempt <= OUTBOUND_SEND_RETRIES; attempt++) {
     const startedAt = Date.now()
@@ -4242,22 +4246,26 @@ export async function sendChunkResilient(
       chunk: meta.chunk,
       of: meta.of,
       len: text.length,
+      entities: entities.length,
       attempt,
       retries: OUTBOUND_SEND_RETRIES,
       timeoutMs: OUTBOUND_SEND_TIMEOUT_MS,
       queueDepth: outboundQueueDepth,
     })
     try {
-      // No parser and no transformations, including on retries. Markdown-like
-      // syntax is ordinary text. Explicit empty entities request no formatting.
+      // Never a parse_mode: the server interprets no character. Formatting is ONLY
+      // the explicit entity list built by outboundFormat (empty = plain text).
       const sent = await bot.api.sendMessage(
-        chatId, text, { entities: [] }, AbortSignal.timeout(OUTBOUND_SEND_TIMEOUT_MS),
+        chatId, text, { entities: entities as never }, AbortSignal.timeout(OUTBOUND_SEND_TIMEOUT_MS),
       )
       const textMatches = sent.text === text
-      const entities = sent.entities ?? []
+      const received = sent.entities ?? []
       logOutbound('chunk.receipt', {
         chatId, chunk: meta.chunk, of: meta.of, messageId: sent.message_id,
-        textMatches, entities,
+        textMatches,
+        entitiesSent: entities.length,
+        entitiesMatch: entitiesDelivered(entities, received),
+        entities: received,
         expectedSha256: createHash('sha256').update(text).digest('hex'),
         receivedSha256: createHash('sha256').update(sent.text ?? '').digest('hex'),
       })
@@ -4278,6 +4286,18 @@ export async function sendChunkResilient(
       if (err instanceof OutboundTextMismatchError) throw err
       lastErr = err
       const c = classifyOutboundError(err)
+      // A 400 with entities attached is a formatting rejection (e.g. a link URL
+      // Telegram refuses). Resend the SAME text with no entities at once: every
+      // character still arrives, only the styling is lost. Never lose the message.
+      if (c.kind === 'api' && c.tgCode === 400 && entities.length > 0) {
+        logOutbound('chunk.fallback', {
+          chatId, chunk: meta.chunk, of: meta.of, attempt, entitiesDropped: entities.length, detail: c.detail,
+        })
+        text = plainFallback({ text, entities })
+        entities = []
+        attempt--
+        continue
+      }
       logOutbound(c.kind === 'timeout' ? 'chunk.timeout' : 'chunk.error', {
         chatId,
         chunk: meta.chunk,
@@ -4317,8 +4337,9 @@ async function sendOutboundToTelegram(ctx: RuntimeContext, envelope: IapEnvelope
   if (!bot || !credential) {
     throw new TelegramRuntimeError(`bot "${botKey}" is not loaded`)
   }
-  // Literal transport is unconditional: TELEGRAM_RICH and old formatting
-  // toggles cannot opt peer messages back into destructive Markdown parsing.
+  // No server-side parser, ever: TELEGRAM_RICH and old formatting toggles stay
+  // inert. Styling comes only from outboundFormat's strict subset rendered into
+  // explicit entities (docs/04 "Outbound formatting"); literal text is verbatim.
   // Newline fingerprint (counts only — zero content leak): GFM renders a blank
   // line (\n\n) as a paragraph break but space-joins a single \n (soft break),
   // so "paragraphs merged into one flowing block" downstream is distinguishable
@@ -4335,7 +4356,18 @@ async function sendOutboundToTelegram(ctx: RuntimeContext, envelope: IapEnvelope
     attachments: envelope.attachments.length,
     queueDepth: outboundQueueDepth,
   })
-  const chunks = chunkText(envelope.message)
+  // TELEGRAM_FORMAT=0 is the kill switch back to the 0.28.11 literal path.
+  const formatted: Formatted = process.env.TELEGRAM_FORMAT === '0'
+    ? { text: envelope.message, entities: [] }
+    : formatOutbound(envelope.message)
+  const chunks = chunkFormatted(formatted, MAX_TELEGRAM_TEXT)
+  logOutbound('envelope.format', {
+    from: envelope.fromPersonality,
+    srcLen: envelope.message.length,
+    len: formatted.text.length,
+    entities: formatted.entities.length,
+    chunks: chunks.length,
+  })
   for (let i = 0; i < chunks.length; i++) {
     await sendChunkResilient(bot, ctx.ownerUserId, chunks[i], { chunk: i + 1, of: chunks.length })
   }
@@ -4348,7 +4380,7 @@ async function sendOutboundToTelegram(ctx: RuntimeContext, envelope: IapEnvelope
   checkpointActivity(envelope.fromPersonality)
   logOutbound('envelope.done', {
     from: envelope.fromPersonality,
-    mode: 'literal',
+    mode: formatted.entities.length > 0 ? 'formatted' : 'literal',
     chunks: chunks.length,
     attachments: envelope.attachments.length,
   })

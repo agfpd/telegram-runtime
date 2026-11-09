@@ -42,7 +42,18 @@ Files and images travel both ways. Inbound from the person (photos, documents, a
 
 ## Text formatting
 
-Peer replies arrive as literal text, not Markdown. Underscores, backslashes, backticks and other markup-like characters are preserved rather than interpreted. Long messages are split into parts without deleting characters. For designed formatting, send a document attachment; approval and notice cards retain their separately generated formatting.
+Peer replies are formatted from a strict Markdown subset, rendered by the runtime itself into explicit Telegram entities (no `parse_mode`, so the server interprets nothing):
+
+| Agent writes | Owner sees |
+|---|---|
+| ```` ```lang ```` … ```` ``` ```` on their own lines | code block (tap to copy), language kept, content byte-exact |
+| `` `fragment` `` | inline monospace, tap copies exactly the fragment, content byte-exact |
+| `**bold**` (same line) | bold |
+| `~~strike~~` (same line) | strikethrough |
+| `[text](https://…)` (http/https/tg/mailto) | link |
+| `# Heading` at line start | bold line |
+
+Everything else is literal: no `_`/`*` italics, no `__bold__`, no `||spoiler||`, no backslash escapes, list markers stay as typed. A delimiter that does not form a complete span (unclosed `**`, `` ` ``, fence; `2**3`; `**/*.ts … src/**`) stays visible text. The only characters ever removed are the delimiters of a recognised span. Literal text the agent wants kept exactly (SQL, paths, commands, `_ % \ $ *`) is safe in plain prose and guaranteed in code. Long messages split before a code block that would straddle the limit, at most 100 entities per message. If Telegram rejects the entities (e.g. a link URL), the chunk is resent unstyled with the URL inline — never lost. Kill switch: `TELEGRAM_FORMAT=0`. Approval and notice cards keep their own HTML formatting.
 
 ## Human approval
 
