@@ -2206,7 +2206,10 @@ export function activeTranscriptPath(target: PeerRecord, rt: string = liveRuntim
 
 // ─── OpenCode observability (docs/20 «Observability ABI», iapeer 17.10.2026) ──
 // The core is the SINGLE producer: `<IAPEER_ROOT>/state/opencode/<p>/events.jsonl`
-// (append-only, never rotated, `seq` monotonic across resumes; native OpenCode
+// (append-only, ROTATED since iapeer 0.4.169: before an append that would push it
+// past 8 MiB the producer renames it to events.jsonl.1 (generations to .4); the live
+// file only shrinks by that rename, never truncated in place; `seq` monotonic across
+// resumes AND generations; native OpenCode
 // events passed through unchanged) and an atomically-written `state.json` whose
 // `status` is the busy/idle truth (NOT the pane-log mtime). We read only these —
 // never OpenCode's SQLite DB nor a second SDK client. Per-personality paths: two
@@ -2389,8 +2392,74 @@ function mtimeMsOrNull(path: string): number | null {
   }
 }
 
+// Rotation-aware byte-offset line tail (pure fs, exported for tests). Opens the
+// file BY PATH on every poll (never holds an fd — a held fd would stay on the
+// renamed generation). Rotation is detected by INODE, not just size: the OpenCode
+// journal (iapeer 0.4.169) rotates by rename to `<path>.1`, and between two polls
+// the fresh live file may already have grown past the old offset — a size-only
+// check would then seek mid-line into the new file and drop its head. On an inode
+// change the unread tail of the old generation is drained from `<path>.1` (if that
+// is still our inode — a double rotation within one poll just loses that tail),
+// then the new file is read from byte 0. In-place truncation (size < offset, same
+// inode) also restarts at 0. Re-reads are safe for opencode only because its
+// parser dedups by `seq`; claude/codex transcripts never rotate.
+// The offset always advances to a newline boundary; a trailing partial line
+// (write in flight) is left for the next poll.
+export function createLineTail(path: string, fromStart = false): { poll: () => string[] } | null {
+  let offset = 0
+  let ino = 0
+  try {
+    const st = statSync(path)
+    offset = fromStart ? 0 : st.size
+    ino = st.ino
+  } catch {
+    return null
+  }
+  const readFrom = (p: string, from: number, to: number): { lines: string[]; consumed: number } => {
+    if (to <= from) return { lines: [], consumed: 0 }
+    const len = to - from
+    const buf = Buffer.allocUnsafe(len)
+    const fd = openSync(p, 'r')
+    let n = 0
+    try {
+      n = readSync(fd, buf, 0, len, from)
+    } finally {
+      closeSync(fd)
+    }
+    const text = buf.subarray(0, n).toString('utf8')
+    const lastNl = text.lastIndexOf('\n')
+    if (lastNl < 0) return { lines: [], consumed: 0 }
+    const consumed = text.slice(0, lastNl + 1)
+    return { lines: consumed.split('\n'), consumed: Buffer.byteLength(consumed, 'utf8') }
+  }
+  return {
+    poll(): string[] {
+      try {
+        const st = statSync(path)
+        const out: string[] = []
+        if (st.ino !== ino) {
+          try {
+            const prev = statSync(path + '.1')
+            if (prev.ino === ino) out.push(...readFrom(path + '.1', offset, prev.size).lines)
+          } catch {}
+          ino = st.ino
+          offset = 0
+        } else if (st.size < offset) {
+          offset = 0 // truncated in place
+        }
+        const r = readFrom(path, offset, st.size)
+        offset += r.consumed
+        out.push(...r.lines)
+        return out
+      } catch {
+        return []
+      }
+    },
+  }
+}
+
 // Tail the peer's transcript for tool-call gestures appended since the last
-// poll. Byte-offset tailing (not re-reading the whole file): the offset is
+// poll via createLineTail (rotation-aware byte-offset tailing): the offset is
 // always advanced to a newline boundary, so each read starts on a clean line;
 // a trailing partial line (write in flight) is left for the next poll. Returns
 // null if no transcript can be located (→ activity silently disabled this turn).
@@ -2410,36 +2479,16 @@ function createTranscriptReader(
   const oc = rt === 'opencode' ? createOpencodeJournalParser(isOperator, opencodeMcpClients(target)) : null
   const parse = oc ? oc.events : rt === 'codex' ? codexLineEvents : claudeLineEvents
   const tokensOf = oc ? oc.tokens : rt === 'codex' ? codexContextTokens : claudeContextTokens
-  let offset = 0
+  const tail = createLineTail(path, fromStart)
+  if (!tail) return null
   let lastTokens: number | null = null
-  try {
-    offset = fromStart ? 0 : statSync(path).size
-  } catch {
-    return null
-  }
   return {
     path,
     contextTokens: () => lastTokens,
     poll(): ToolEvent[] {
       try {
-        const size = statSync(path).size
-        if (size < offset) offset = 0 // file rotated/truncated
-        if (size <= offset) return []
-        const len = size - offset
-        const buf = Buffer.allocUnsafe(len)
-        const fd = openSync(path, 'r')
-        try {
-          readSync(fd, buf, 0, len, offset)
-        } finally {
-          closeSync(fd)
-        }
-        const text = buf.toString('utf8')
-        const lastNl = text.lastIndexOf('\n')
-        if (lastNl < 0) return [] // no complete line yet
-        const consumed = text.slice(0, lastNl + 1)
-        offset += Buffer.byteLength(consumed, 'utf8')
         const events: ToolEvent[] = []
-        for (const line of consumed.split('\n')) {
+        for (const line of tail.poll()) {
           if (!line.trim()) continue
           let obj: unknown
           try {

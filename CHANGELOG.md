@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Granular history begins at the initial public release (0.16.5); earlier work
 predates the public repository.
 
+## [0.29.1] - 2026-11-12
+
+### Fixed
+
+- Activity stream for OpenCode peers survives journal rotation (iapeer 0.4.169:
+  `events.jsonl` is renamed to `events.jsonl.1` past 8 MiB). The transcript tail
+  (`createLineTail`) now detects rotation by inode, not only by size: when the new
+  live file had already grown past the old offset, the size check missed it and
+  the reader seeked mid-line into the new file, dropping its head. On rotation the
+  unread tail of the old generation is drained from `.1`, then the new file is read
+  from byte 0; replays are dropped by the parser's existing `seq` dedup. The file
+  is still opened by path on every poll (no held fd).
+
 ## [0.29.0] - 2026-11-09
 
 ### Added
